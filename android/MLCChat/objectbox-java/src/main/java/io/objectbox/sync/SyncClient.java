@@ -1,0 +1,231 @@
+/*
+ * Copyright 2019-2021 ObjectBox Ltd. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package io.objectbox.sync;
+
+import java.io.Closeable;
+
+import javax.annotation.Nullable;
+
+import io.objectbox.annotation.apihint.Experimental;
+import io.objectbox.sync.SyncBuilder.RequestUpdatesMode;
+import io.objectbox.sync.listener.SyncChangeListener;
+import io.objectbox.sync.listener.SyncCompletedListener;
+import io.objectbox.sync.listener.SyncConnectionListener;
+import io.objectbox.sync.listener.SyncListener;
+import io.objectbox.sync.listener.SyncLoginListener;
+import io.objectbox.sync.listener.SyncTimeListener;
+
+/**
+ * ObjectBox sync client. Build a client with {@link Sync#client}.
+ * <p>
+ * Keep the instance around (avoid garbage collection) while you want to have sync ongoing.
+ * For a clean shutdown, call {@link #close()}.
+ * <p>
+ * SyncClient is thread-safe.
+ */
+@SuppressWarnings("unused")
+@Experimental
+public interface SyncClient extends Closeable {
+
+    /**
+     * Gets the sync server URL this client is connected to.
+     */
+    String getServerUrl();
+
+    /**
+     * Flag indicating if the sync client was started.
+     * Started clients try to connect, login, and sync with the sync destination.
+     */
+    boolean isStarted();
+
+    /**
+     * Flag indicating if the sync client was started.
+     * Logged in clients can sync with the sync destination to exchange data.
+     */
+    boolean isLoggedIn();
+
+    /**
+     * Response code of last login attempt. One of {@link SyncLoginCodes}.
+     */
+    long getLastLoginCode();
+
+    /**
+     * Estimates the current server timestamp in nanoseconds based on the last known server time.
+     *
+     * @return unix timestamp in nanoseconds (since epoch);
+     * or 0 if there has not been a server contact yet and thus the server's time is unknown
+     */
+    long getServerTimeNanos();
+
+    /**
+     * Returns the estimated difference in nanoseconds between the server time and the local timestamp.
+     * urns the difference in nanoseconds between the current local time of this client
+     * Equivalent to calculating {@link #getServerTimeNanos()} - "current time" (nanos since epoch),
+     * except for when the server time is unknown, then the result is zero.
+     *
+     * @return time difference in nanoseconds; e.g. positive if server time is ahead of local time;
+     * or 0 if there has not been a server contact yet and thus the server's time is unknown
+     */
+    long getServerTimeDiffNanos();
+
+    /**
+     * Returns the estimated roundtrip time in nanoseconds to the server and back.
+     * This is measured during login.
+     *
+     * @return roundtrip time in nanoseconds;
+     * or 0 if there has not been a server contact yet and thus the roundtrip time could not be estimated
+     */
+    long getRoundtripTimeNanos();
+
+    /**
+     * Sets a listener to observe login events. Replaces a previously set listener.
+     * Set to {@code null} to remove the listener.
+     */
+    void setSyncLoginListener(@Nullable SyncLoginListener listener);
+
+    /**
+     * Sets a listener to observe Sync completed events. Replaces a previously set listener.
+     * Set to {@code null} to remove the listener.
+     */
+    void setSyncCompletedListener(@Nullable SyncCompletedListener listener);
+
+    /**
+     * Sets a listener to observe Sync connection events. Replaces a previously set listener.
+     * Set to {@code null} to remove the listener.
+     */
+    void setSyncConnectionListener(@Nullable SyncConnectionListener listener);
+
+    /**
+     * Sets a listener to observe all Sync events.
+     * Replaces all other previously set listeners, except a {@link SyncChangeListener}.
+     * Set to {@code null} to remove the listener.
+     */
+    void setSyncListener(@Nullable SyncListener listener);
+
+    /**
+     * Sets a {@link SyncChangeListener}. Replaces a previously set listener.
+     * Set to {@code null} to remove the listener.
+     */
+    void setSyncChangeListener(@Nullable SyncChangeListener listener);
+
+    /**
+     * Sets a {@link SyncTimeListener}. Replaces a previously set listener.
+     * Set to {@code null} to remove the listener.
+     */
+    void setSyncTimeListener(@Nullable SyncTimeListener timeListener);
+
+    /**
+     * Updates the login credentials. This should not be required during regular use.
+     * The original credentials were passed when building sync client.
+     */
+    void setLoginCredentials(SyncCredentials credentials);
+
+    /**
+     * Waits until the sync client receives a response to its first (connection and) login attempt
+     * or until the given time has expired.
+     * Use {@link #isLoggedIn()} or {@link #getLastLoginCode()} afterwards to determine if login was successful.
+     * Starts the sync if it is not already.
+     *
+     * @return true if a response was received in the given time window.
+     */
+    boolean awaitFirstLogin(long millisToWait);
+
+    /**
+     * Starts the client. It will connect to the server, log in (authenticate) and start syncing.
+     */
+    void start();
+
+    /**
+     * Stops the client. Does nothing if the sync client is already stopped.
+     */
+    void stop();
+
+    /**
+     * Closes and cleans up all resources used by this sync client.
+     * It can no longer be used afterwards, build a new sync client instead.
+     * Does nothing if this sync client has already been closed.
+     */
+    void close();
+
+    /**
+     * Asks the sync server to resume sync updates.
+     * This is useful if sync updates were turned off with
+     * {@link SyncBuilder#requestUpdatesMode(RequestUpdatesMode) requestUpdatesMode(MANUAL)}.
+     *
+     * @return 'true' if the request was likely sent (e.g. the sync client is in "logged in" state)
+     * or 'false' if the request was not sent (and will not be sent in the future)
+     * @see #cancelUpdates()
+     */
+    boolean requestUpdates();
+
+    /**
+     * Asks the server to send sync updates until this sync client is up-to-date, then pauses sync updates again.
+     * This is useful if sync updates were turned off with
+     * {@link SyncBuilder#requestUpdatesMode(RequestUpdatesMode) requestUpdatesMode(MANUAL)}.
+     *
+     * @return 'true' if the request was likely sent (e.g. the sync client is in "logged in" state)
+     * or 'false' if the request was not sent (and will not be sent in the future)
+     */
+    boolean requestUpdatesOnce();
+
+    /**
+     * Asks the server to pause sync updates.
+     *
+     * @return 'true' if the request was likely sent (e.g. the sync client is in "logged in" state)
+     * or 'false' if the request was not sent (and will not be sent in the future)
+     * @see #requestUpdates()
+     */
+    boolean cancelUpdates();
+
+    /**
+     * Experimental. This API might change or be removed in the future.
+     * <p>
+     * Temporary only, try not to use it.
+     * <p>
+     * Request a sync of all previous changes from the server.
+     *
+     * @return 'true' if the request was likely sent (e.g. the sync client is in "logged in" state)
+     * or 'false' if the request was not sent (and will not be sent in the future).
+     */
+    @Experimental
+    boolean requestFullSync();
+
+    /**
+     * Lets the sync client know that a working network connection
+     * is available.
+     * <p>
+     * This can help speed up reconnecting to the sync server.
+     */
+    void notifyConnectionAvailable();
+
+    /**
+     * Experimental. This API might change or be removed in the future.
+     * <p>
+     * Start building a message of Objects with optional flags (set to 0) and topic (set to null).
+     * <p>
+     * Use like
+     * <pre>
+     * syncClient.startObjectsMessage(0, "some-topic")
+     *     .addString(1, "Hello!")
+     *     .addBytes(2, "Hello!".getBytes(StandardCharsets.UTF_8), false)
+     *     .send();
+     * </pre>
+     */
+    @Experimental
+    ObjectsMessageBuilder startObjectsMessage(long flags, @Nullable String topic);
+
+}
