@@ -4,48 +4,9 @@
  */
 #include "engine_state.h"
 
-#include <picojson.h>
-
 namespace mlc {
 namespace llm {
 namespace serve {
-
-String EngineStats::AsJSON() const {
-  picojson::object config;
-  config["single_token_prefill_latency"] = picojson::value(
-      total_prefill_length > 0 ? request_total_prefill_time / total_prefill_length : 0.0);
-  config["single_token_decode_latency"] = picojson::value(
-      total_decode_length > 0 ? request_total_decode_time / total_decode_length : 0.0);
-  config["engine_total_prefill_time"] = picojson::value(engine_total_prefill_time);
-  config["engine_total_decode_time"] = picojson::value(engine_total_decode_time);
-  config["total_prefill_tokens"] = picojson::value(total_prefill_length);
-  config["total_decode_tokens"] = picojson::value(total_decode_length);
-  config["total_accepted_tokens"] = picojson::value(total_accepted_length);
-  config["total_draft_tokens"] = picojson::value(total_draft_length);
-  auto f_vector_to_array = [](const std::vector<int64_t>& vec) {
-    picojson::array arr;
-    for (int64_t v : vec) {
-      arr.push_back(picojson::value(v));
-    }
-    return picojson::value(arr);
-  };
-  config["accept_count"] = f_vector_to_array(accept_count);
-  config["draft_count"] = f_vector_to_array(draft_count);
-  return picojson::value(config).serialize(true);
-}
-
-void EngineStats::Reset() {
-  request_total_prefill_time = 0.0f;
-  request_total_decode_time = 0.0f;
-  engine_total_prefill_time = 0.0f;
-  engine_total_decode_time = 0.0f;
-  total_prefill_length = 0;
-  total_decode_length = 0;
-  total_accepted_length = 0;
-  total_draft_length = 0;
-  accept_count.clear();
-  draft_count.clear();
-}
 
 TVM_REGISTER_OBJECT_TYPE(EngineStateObj);
 
@@ -56,29 +17,36 @@ void EngineStateObj::Reset() {
   waiting_queue.clear();
   request_states.clear();
   id_manager.Reset();
-  stats.Reset();
+  metrics.Reset();
   if (prefix_cache.defined()) {
     prefix_cache->Reset();
   }
+  running_rsentries_changed = true;
+  postproc_workspace = ActionPostProcessWorkspace();
 }
 
 RequestState EngineStateObj::GetRequestState(Request request) {
-  auto it = request_states.find(request->id);
-  ICHECK(it != request_states.end());
-  return it->second;
+  ICHECK(request->rstate != nullptr) << "The state of the request has not been defined.";
+  return GetRef<RequestState>(static_cast<RequestStateNode*>(request->rstate));
 }
 
-void EngineStats::UpdateSpecDecodingStats(int draft_length, int accept_length) {
-  if (accept_count.size() < draft_length) {
-    this->accept_count.resize(draft_length, 0);
-    this->draft_count.resize(draft_length, 0);
-  }
-  for (int j = 0; j < draft_length; ++j) {
-    if (j < accept_length) {
-      this->accept_count[j]++;
+const std::vector<RequestStateEntry>& EngineStateObj::GetRunningRequestStateEntries() {
+  if (running_rsentries_changed) {
+    cached_running_rsentries_.clear();
+    for (const Request& request : running_queue) {
+      for (const RequestStateEntry& rsentry : GetRequestState(request)->entries) {
+        // One request entry is considered as running for decode if it is a leaf and has
+        // finished all input prefill.
+        if (rsentry->status == RequestStateStatus::kAlive && rsentry->child_indices.empty() &&
+            rsentry->mstates[0]->inputs.empty()) {
+          cached_running_rsentries_.push_back(rsentry);
+        }
+      }
     }
-    this->draft_count[j]++;
+    running_rsentries_changed = false;
   }
+  return cached_running_rsentries_;
+  //
 }
 
 }  // namespace serve

@@ -14,18 +14,19 @@ from typing import (
     List,
     Literal,
     Optional,
+    Tuple,
     Union,
     overload,
 )
 
 from tvm.runtime import Device
 
-from mlc_llm.protocol import openai_api_protocol
+from mlc_llm.protocol import debug_protocol, openai_api_protocol
+from mlc_llm.protocol.generation_config import GenerationConfig
 from mlc_llm.serve import data, engine_utils
-from mlc_llm.serve.config import GenerationConfig
-from mlc_llm.serve.request import Request
-from mlc_llm.streamer import TextStreamer
+from mlc_llm.serve.config import EngineConfig
 from mlc_llm.support import logging
+from mlc_llm.tokenizers import TextStreamer
 
 from . import engine_base
 
@@ -33,16 +34,21 @@ logging.enable_logging()
 logger = logging.getLogger(__name__)
 
 
+# Note: we define both AsyncChat and Chat for Python type analysis.
+class AsyncChat:  # pylint: disable=too-few-public-methods
+    """The proxy class to direct to async chat completions."""
+
+    def __init__(self, engine: weakref.ReferenceType) -> None:
+        assert isinstance(engine(), AsyncMLCEngine)
+        self.completions = AsyncChatCompletion(engine)
+
+
 class Chat:  # pylint: disable=too-few-public-methods
     """The proxy class to direct to chat completions."""
 
     def __init__(self, engine: weakref.ReferenceType) -> None:
-        assert isinstance(engine(), (AsyncMLCEngine, MLCEngine))
-        self.completions = (
-            AsyncChatCompletion(engine)  # type: ignore
-            if isinstance(engine(), AsyncMLCEngine)
-            else ChatCompletion(engine)  # type: ignore
-        )
+        assert isinstance(engine(), MLCEngine)
+        self.completions = ChatCompletion(engine)
 
 
 class AsyncChatCompletion:  # pylint: disable=too-few-public-methods
@@ -72,14 +78,15 @@ class AsyncChatCompletion:  # pylint: disable=too-few-public-methods
         n: int = 1,
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
+        stream_options: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[Literal["none", "auto"], Dict]] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[openai_api_protocol.ChatCompletionStreamResponse, Any]:
         """Asynchronous streaming chat completion interface with OpenAI API compatibility.
         The method is a coroutine that streams ChatCompletionStreamResponse
@@ -92,6 +99,10 @@ class AsyncChatCompletion:  # pylint: disable=too-few-public-methods
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+
+        extra_body: Optional[Dict[str, Any]] = None,
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
 
         Yields
         ------
@@ -122,14 +133,15 @@ class AsyncChatCompletion:  # pylint: disable=too-few-public-methods
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stream: Literal[False] = False,
+        stream_options: Literal[None] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[Literal["none", "auto"], Dict]] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> openai_api_protocol.ChatCompletionResponse:
         """Asynchronous non-streaming chat completion interface with OpenAI API compatibility.
         The method is a coroutine that streams ChatCompletionStreamResponse
@@ -143,8 +155,12 @@ class AsyncChatCompletion:  # pylint: disable=too-few-public-methods
             The optional request id.
             A random one will be generated if it is not given.
 
+        extra_body: Optional[Dict[str, Any]] = None,
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
+
         Returns
-        ------
+        -------
         response : ChatCompletionResponse
             The chat completion response conforming to OpenAI API.
             See mlc_llm/protocol/openai_api_protocol.py or
@@ -171,14 +187,15 @@ class AsyncChatCompletion:  # pylint: disable=too-few-public-methods
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stream: bool = False,
+        stream_options: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[Literal["none", "auto"], Dict]] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> Union[
         AsyncGenerator[openai_api_protocol.ChatCompletionStreamResponse, Any],
         openai_api_protocol.ChatCompletionResponse,
@@ -192,6 +209,10 @@ class AsyncChatCompletion:  # pylint: disable=too-few-public-methods
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+
+        extra_body: Optional[Dict[str, Any]] = None,
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
 
         Raises
         ------
@@ -211,14 +232,19 @@ class AsyncChatCompletion:  # pylint: disable=too-few-public-methods
             seed=seed,
             stop=stop,
             stream=stream,
+            stream_options=(
+                openai_api_protocol.StreamOptions.model_validate(stream_options)
+                if stream_options is not None
+                else None
+            ),
             temperature=temperature,
             top_p=top_p,
             tools=tools,
             tool_choice=tool_choice,
             user=user,
-            ignore_eos=ignore_eos,
             response_format=response_format,
             request_id=request_id,
+            debug_config=(extra_body.get("debug_config", None) if extra_body is not None else None),
         )
 
 
@@ -249,14 +275,15 @@ class ChatCompletion:  # pylint: disable=too-few-public-methods
         n: int = 1,
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
+        stream_options: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[Literal["none", "auto"], Dict]] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> Iterator[openai_api_protocol.ChatCompletionStreamResponse]:
         """Synchronous streaming chat completion interface with OpenAI API compatibility.
         The method streams back ChatCompletionStreamResponse that conforms to
@@ -269,6 +296,10 @@ class ChatCompletion:  # pylint: disable=too-few-public-methods
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+
+        extra_body: Optional[Dict[str, Any]] = None,
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
 
         Yields
         ------
@@ -299,14 +330,15 @@ class ChatCompletion:  # pylint: disable=too-few-public-methods
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stream: Literal[False] = False,
+        stream_options: Literal[None] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[Literal["none", "auto"], Dict]] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> openai_api_protocol.ChatCompletionResponse:
         """Synchronous non-streaming chat completion interface with OpenAI API compatibility.
 
@@ -317,6 +349,10 @@ class ChatCompletion:  # pylint: disable=too-few-public-methods
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+
+        extra_body: Optional[Dict[str, Any]] = None,
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
 
         Returns
         ------
@@ -346,14 +382,15 @@ class ChatCompletion:  # pylint: disable=too-few-public-methods
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stream: bool = False,
+        stream_options: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[Literal["none", "auto"], Dict]] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> Union[
         Iterator[openai_api_protocol.ChatCompletionStreamResponse],
         openai_api_protocol.ChatCompletionResponse,
@@ -367,6 +404,10 @@ class ChatCompletion:  # pylint: disable=too-few-public-methods
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+
+        extra_body: Optional[Dict[str, Any]] = None,
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
 
         Raises
         ------
@@ -386,14 +427,19 @@ class ChatCompletion:  # pylint: disable=too-few-public-methods
             seed=seed,
             stop=stop,
             stream=stream,
+            stream_options=(
+                openai_api_protocol.StreamOptions.model_validate(stream_options)
+                if stream_options is not None
+                else None
+            ),
             temperature=temperature,
             top_p=top_p,
             tools=tools,
             tool_choice=tool_choice,
             user=user,
-            ignore_eos=ignore_eos,
             response_format=response_format,
             request_id=request_id,
+            debug_config=(extra_body.get("debug_config", None) if extra_body is not None else None),
         )
 
 
@@ -422,17 +468,18 @@ class AsyncCompletion:  # pylint: disable=too-few-public-methods
         logprobs: bool = False,
         top_logprobs: int = 0,
         logit_bias: Optional[Dict[int, float]] = None,
-        max_tokens: int = 16,
+        max_tokens: Optional[int] = None,
         n: int = 1,
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
+        stream_options: Optional[Dict[str, Any]] = None,
         suffix: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[openai_api_protocol.CompletionResponse, Any]:
         """Asynchronous streaming completion interface with OpenAI API compatibility.
         The method is a coroutine that streams CompletionResponse
@@ -445,6 +492,10 @@ class AsyncCompletion:  # pylint: disable=too-few-public-methods
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+
+        extra_body: Optional[Dict[str, Any]] = None,
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
 
         Yields
         ------
@@ -472,18 +523,19 @@ class AsyncCompletion:  # pylint: disable=too-few-public-methods
         logprobs: bool = False,
         top_logprobs: int = 0,
         logit_bias: Optional[Dict[int, float]] = None,
-        max_tokens: int = 16,
+        max_tokens: Optional[int] = None,
         n: int = 1,
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stream: Literal[False] = False,
+        stream_options: Literal[None] = None,
         suffix: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> openai_api_protocol.CompletionResponse:
         """Asynchronous non-streaming completion interface with OpenAI API compatibility.
 
@@ -494,6 +546,10 @@ class AsyncCompletion:  # pylint: disable=too-few-public-methods
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+
+        extra_body: Optional[Dict[str, Any]] = None,
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
 
         Returns
         ------
@@ -520,18 +576,19 @@ class AsyncCompletion:  # pylint: disable=too-few-public-methods
         logprobs: bool = False,
         top_logprobs: int = 0,
         logit_bias: Optional[Dict[int, float]] = None,
-        max_tokens: int = 16,
+        max_tokens: Optional[int] = None,
         n: int = 1,
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stream: bool = False,
+        stream_options: Optional[Dict[str, Any]] = None,
         suffix: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> Union[
         AsyncGenerator[openai_api_protocol.CompletionResponse, Any],
         openai_api_protocol.CompletionResponse,
@@ -545,6 +602,10 @@ class AsyncCompletion:  # pylint: disable=too-few-public-methods
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+
+        extra_body: Optional[Dict[str, Any]] = None,
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
 
         Raises
         ------
@@ -566,13 +627,18 @@ class AsyncCompletion:  # pylint: disable=too-few-public-methods
             seed=seed,
             stop=stop,
             stream=stream,
+            stream_options=(
+                openai_api_protocol.StreamOptions.model_validate(stream_options)
+                if stream_options is not None
+                else None
+            ),
             suffix=suffix,
             temperature=temperature,
             top_p=top_p,
             user=user,
-            ignore_eos=ignore_eos,
             response_format=response_format,
             request_id=request_id,
+            debug_config=(extra_body.get("debug_config", None) if extra_body is not None else None),
         )
 
 
@@ -601,18 +667,19 @@ class Completion:  # pylint: disable=too-few-public-methods
         logprobs: bool = False,
         top_logprobs: int = 0,
         logit_bias: Optional[Dict[int, float]] = None,
-        max_tokens: int = 16,
+        max_tokens: Optional[int] = None,
         n: int = 1,
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
+        stream_options: Optional[Dict[str, Any]] = None,
         suffix: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
-    ) -> openai_api_protocol.CompletionResponse:
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> Iterator[openai_api_protocol.CompletionResponse]:
         """Synchronous streaming completion interface with OpenAI API compatibility.
         The method streams back CompletionResponse that conforms to
         OpenAI API one at a time via yield.
@@ -624,6 +691,10 @@ class Completion:  # pylint: disable=too-few-public-methods
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+
+        extra_body: Optional[Dict[str, Any]] = None,
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
 
         Yields
         ------
@@ -651,19 +722,20 @@ class Completion:  # pylint: disable=too-few-public-methods
         logprobs: bool = False,
         top_logprobs: int = 0,
         logit_bias: Optional[Dict[int, float]] = None,
-        max_tokens: int = 16,
+        max_tokens: Optional[int] = None,
         n: int = 1,
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stream: Literal[False] = False,
+        stream_options: Literal[None] = None,
         suffix: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
-    ) -> Iterator[openai_api_protocol.CompletionResponse]:
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> openai_api_protocol.CompletionResponse:
         """Synchronous non-streaming completion interface with OpenAI API compatibility.
 
         See https://platform.openai.com/docs/api-reference/completions/create for specification.
@@ -674,8 +746,12 @@ class Completion:  # pylint: disable=too-few-public-methods
             The optional request id.
             A random one will be generated if it is not given.
 
+        extra_body: Optional[Dict[str, Any]] = None,
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
+
         Returns
-        ------
+        -------
         response : CompletionResponse
             The completion response conforming to OpenAI API.
             See mlc_llm/protocol/openai_api_protocol.py or
@@ -699,19 +775,23 @@ class Completion:  # pylint: disable=too-few-public-methods
         logprobs: bool = False,
         top_logprobs: int = 0,
         logit_bias: Optional[Dict[int, float]] = None,
-        max_tokens: int = 16,
+        max_tokens: Optional[int] = None,
         n: int = 1,
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stream: bool = False,
+        stream_options: Optional[Dict[str, Any]] = None,
         suffix: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
-    ) -> Iterator[openai_api_protocol.CompletionResponse]:
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> Union[
+        Iterator[openai_api_protocol.CompletionResponse],
+        openai_api_protocol.CompletionResponse,
+    ]:
         """Synchronous completion interface with OpenAI API compatibility.
 
         See https://platform.openai.com/docs/api-reference/completions/create for specification.
@@ -721,6 +801,10 @@ class Completion:  # pylint: disable=too-few-public-methods
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+
+        extra_body: Optional[Dict[str, Any]] = None,
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
 
         Raises
         ------
@@ -742,13 +826,18 @@ class Completion:  # pylint: disable=too-few-public-methods
             seed=seed,
             stop=stop,
             stream=stream,
+            stream_options=(
+                openai_api_protocol.StreamOptions.model_validate(stream_options)
+                if stream_options is not None
+                else None
+            ),
             suffix=suffix,
             temperature=temperature,
             top_p=top_p,
             user=user,
-            ignore_eos=ignore_eos,
             response_format=response_format,
             request_id=request_id,
+            debug_config=(extra_body.get("debug_config", None) if extra_body is not None else None),
         )
 
 
@@ -776,7 +865,7 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
         The engine mode in MLC LLM.
         We provide three preset modes: "local", "interactive" and "server".
         The default mode is "local".
-        The choice of mode decides the values of "max_batch_size", "max_total_sequence_length"
+        The choice of mode decides the values of "max_num_sequence", "max_total_sequence_length"
         and "prefill_chunk_size" when they are not explicitly specified.
         1. Mode "local" refers to the local server deployment which has low
         request concurrency. So the max batch size will be set to 4, and max
@@ -791,61 +880,15 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
         In this mode, we will automatically infer the largest possible max batch
         size and max total sequence length.
 
-        You can manually specify arguments "max_batch_size", "max_total_sequence_length" and
+        You can manually specify arguments "max_num_sequence", "max_total_sequence_length" and
         "prefill_chunk_size" to override the automatic inferred values.
 
-    additional_models : Optional[List[str]]
-        The model paths and (optional) model library paths of additional models
-        (other than the main model).
-        When engine is enabled with speculative decoding, additional models are needed.
-        Each string in the list is either in form "model_path" or "model_path:model_lib".
-        When the model lib of a model is not given, JIT model compilation will
-        be activated to compile the model automatically.
-
-    max_batch_size : Optional[int]
-        The maximum allowed batch size set for the KV cache to concurrently support.
-
-    max_total_sequence_length : Optional[int]
-        The KV cache total token capacity, i.e., the maximum total number of tokens that
-        the KV cache support. This decides the GPU memory size that the KV cache consumes.
-        If not specified, system will automatically estimate the maximum capacity based
-        on the vRAM size on GPU.
-
-    prefill_chunk_size : Optional[int]
-        The maximum number of tokens the model passes for prefill each time.
-        It should not exceed the prefill chunk size in model config.
-        If not specified, this defaults to the prefill chunk size in model config.
-
-    max_history_size : Optional[int]
-        The maximum history for RNN state.
-
-    prefix_cache_max_num_seqs: Optional[int]
-        The maximum number of sequences in prefix cache, default as max_batch_size.
-        And set 0 to disable prefix cache, set -1 to have infinite capacity prefix cache.
-
-    gpu_memory_utilization : Optional[float]
-        A number in (0, 1) denoting the fraction of GPU memory used by the server in total.
-        It is used to infer to maximum possible KV cache capacity.
-        When it is unspecified, it defaults to 0.85.
-        Under mode "local" or "interactive", the actual memory usage may be
-        significantly smaller than this number. Under mode "server", the actual
-        memory usage may be slightly larger than this number.
-
-    speculative_mode : Literal["disable", "small_draft", "eagle", "medusa"]
-        The speculative mode.
-        "disable" means speculative decoding is disabled.
-        "small_draft" means the normal speculative decoding (small draft) mode.
-        "eagle" means the eagle-style speculative decoding.
-        "medusa" means the medusa-style speculative decoding.
-
-    spec_draft_length : int
-        The number of tokens to generate in speculative proposal (draft).
+    engine_config : Optional[EngineConfig]
+        Additional configurable arguments of MLC engine.
+        See class "EngineConfig" for more detail.
 
     enable_tracing : bool
         A boolean indicating if to enable event logging for requests.
-
-    verbose : bool
-        A boolean indicating whether to print logging info in engine.
     """
 
     def __init__(  # pylint: disable=too-many-arguments,too-many-locals
@@ -855,17 +898,8 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
         *,
         model_lib: Optional[str] = None,
         mode: Literal["local", "interactive", "server"] = "local",
-        additional_models: Optional[List[str]] = None,
-        max_batch_size: Optional[int] = None,
-        max_total_sequence_length: Optional[int] = None,
-        prefill_chunk_size: Optional[int] = None,
-        max_history_size: Optional[int] = None,
-        prefix_cache_max_num_seqs: Optional[int] = None,
-        gpu_memory_utilization: Optional[float] = None,
-        speculative_mode: Literal["disable", "small_draft", "eagle", "medusa"] = "disable",
-        spec_draft_length: int = 4,
+        engine_config: Optional[EngineConfig] = None,
         enable_tracing: bool = False,
-        verbose: bool = True,
     ) -> None:
         super().__init__(
             "async",
@@ -873,30 +907,32 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
             device=device,
             model_lib=model_lib,
             mode=mode,
-            additional_models=additional_models,
-            max_batch_size=max_batch_size,
-            max_total_sequence_length=max_total_sequence_length,
-            prefill_chunk_size=prefill_chunk_size,
-            max_history_size=max_history_size,
-            prefix_cache_max_num_seqs=prefix_cache_max_num_seqs,
-            gpu_memory_utilization=gpu_memory_utilization,
-            speculative_mode=speculative_mode,
-            spec_draft_length=spec_draft_length,
+            engine_config=engine_config,
             enable_tracing=enable_tracing,
-            verbose=verbose,
         )
-        self.chat = Chat(weakref.ref(self))
+        self.chat = AsyncChat(weakref.ref(self))
         self.completions = AsyncCompletion(weakref.ref(self))
 
     async def abort(self, request_id: str) -> None:
         """Generation abortion interface.
 
-        Parameter
+        Parameters
         ---------
         request_id : str
             The id of the request to abort.
         """
         self._abort(request_id)
+
+    async def metrics(self) -> engine_base.EngineMetrics:
+        """Get engine metrics
+
+        Returns
+        -------
+        metrics: EngineMetrics
+            The engine metrics
+        """
+        # pylint: disable=protected-access
+        return await engine_base._async_query_engine_metrics(self)
 
     async def _chat_completion(  # pylint: disable=too-many-arguments,too-many-locals
         self,
@@ -913,14 +949,15 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stream: bool = False,
+        stream_options: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[Literal["none", "auto"], Dict]] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        debug_config: Optional[Dict[str, Any]] = None,
     ) -> Union[
         AsyncGenerator[openai_api_protocol.ChatCompletionStreamResponse, Any],
         openai_api_protocol.ChatCompletionResponse,
@@ -934,6 +971,11 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+            Extra body options to pass to the request.
+            Can be used to pass debug config as extra_body["debug_config"]
+
+        debug_config: Optional[Dict[str, Any]] = None,
+            Debug config body options to pass to the request.
 
         Raises
         ------
@@ -960,6 +1002,11 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
                 seed=seed,
                 stop=stop,
                 stream=stream,
+                stream_options=(
+                    openai_api_protocol.StreamOptions.model_validate(stream_options)
+                    if stream_options is not None
+                    else None
+                ),
                 temperature=temperature,
                 top_p=top_p,
                 tools=(
@@ -969,30 +1016,36 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
                 ),
                 tool_choice=tool_choice,
                 user=user,
-                ignore_eos=ignore_eos,
                 response_format=(
                     openai_api_protocol.RequestResponseFormat.model_validate(response_format)
                     if response_format is not None
                     else None
                 ),
+                debug_config=(
+                    debug_protocol.DebugConfig.model_validate(debug_config)
+                    if debug_config is not None
+                    else None
+                ),
             ),
             request_id=request_id,
+            request_final_usage_include_extra=True,
         )
         if stream:
             # Stream response.
             return chatcmpl_generator
         # Normal response.
-        num_prompt_tokens = 0
-        num_completion_tokens = 0
         output_texts = ["" for _ in range(n)]
         finish_reasons: List[Optional[str]] = [None for _ in range(n)]
         logprob_results: Optional[List[List[openai_api_protocol.LogProbsContent]]] = (
             [[] for _ in range(n)] if logprobs else None
         )
+        request_final_usage = None
         try:
             async for response in chatcmpl_generator:
-                num_prompt_tokens = response.usage.prompt_tokens
-                num_completion_tokens = response.usage.completion_tokens
+                # when usage is not None this is the last chunk
+                if response.usage is not None:
+                    request_final_usage = response.usage
+                    continue
                 for choice in response.choices:
                     assert isinstance(choice.delta.content, str)
                     output_texts[choice.index] += choice.delta.content
@@ -1003,12 +1056,12 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
                         logprob_results[  # pylint: disable=unsupported-assignment-operation
                             choice.index
                         ] += choice.logprobs.content
-        except (
-            Exception,
-            asyncio.CancelledError,
-        ) as err:  # pylint: disable=broad-exception-caught
+        except asyncio.CancelledError:  # pylint: disable=try-except-raise
+            # for cancelled error, we can simply pass it through
+            raise
+        except Exception as err:  # pylint: disable=broad-exception-caught
             logger.error("Error in chat completion with request ID %s: %s", request_id, err)
-            raise err
+            raise
 
         assert all(finish_reason is not None for finish_reason in finish_reasons)
         use_function_calling, tool_calls_list = engine_base.process_function_call_output(
@@ -1022,8 +1075,7 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
             tool_calls_list=tool_calls_list,
             logprob_results=logprob_results,
             use_function_calling=use_function_calling,
-            num_prompt_tokens=num_prompt_tokens,
-            num_completion_tokens=num_completion_tokens,
+            usage=request_final_usage,
         )
 
     async def _completion(  # pylint: disable=too-many-arguments,too-many-locals
@@ -1038,18 +1090,19 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
         logprobs: bool = False,
         top_logprobs: int = 0,
         logit_bias: Optional[Dict[int, float]] = None,
-        max_tokens: int = 16,
+        max_tokens: Optional[int] = None,
         n: int = 1,
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stream: bool = False,
+        stream_options: Optional[Dict[str, Any]] = None,
         suffix: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        debug_config: Optional[Dict[str, Any]] = None,
     ) -> Union[
         AsyncGenerator[openai_api_protocol.CompletionResponse, Any],
         openai_api_protocol.CompletionResponse,
@@ -1063,6 +1116,9 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+
+        debug_config: Optional[Dict[str, Any]] = None,
+            Extra debug options to pass to the request.
 
         Raises
         ------
@@ -1087,25 +1143,34 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
                 seed=seed,
                 stop=stop,
                 stream=stream,
+                stream_options=(
+                    openai_api_protocol.StreamOptions.model_validate(stream_options)
+                    if stream_options is not None
+                    else None
+                ),
                 suffix=suffix,
                 temperature=temperature,
                 top_p=top_p,
                 user=user,
-                ignore_eos=ignore_eos,
                 response_format=(
                     openai_api_protocol.RequestResponseFormat.model_validate(response_format)
                     if response_format is not None
                     else None
                 ),
+                debug_config=(
+                    debug_protocol.DebugConfig.model_validate(debug_config)
+                    if debug_config is not None
+                    else None
+                ),
             ),
-            request_id,
+            request_id=request_id,
+            request_final_usage_include_extra=True,
         )
         if stream:
             # Stream response.
             return cmpl_generator
         # Normal response.
-        num_prompt_tokens = 0
-        num_completion_tokens = 0
+        request_final_usage = None
         output_texts = ["" for _ in range(n)]
         finish_reasons: List[Optional[str]] = [None for _ in range(n)]
         logprob_results: Optional[List[List[openai_api_protocol.LogProbsContent]]] = (
@@ -1113,8 +1178,10 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
         )
 
         async for response in cmpl_generator:
-            num_prompt_tokens = response.usage.prompt_tokens
-            num_completion_tokens = response.usage.completion_tokens
+            # this is the final chunk
+            if response.usage is not None:
+                request_final_usage = response.usage
+                continue
             for choice in response.choices:
                 output_texts[choice.index] += choice.text
                 if choice.finish_reason is not None and finish_reasons[choice.index] is None:
@@ -1126,18 +1193,21 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
                     ] += choice.logprobs.content
 
         assert all(finish_reason is not None for finish_reason in finish_reasons)
+
         return engine_base.wrap_completion_response(
             request_id=request_id,
             model=model,
             output_texts=output_texts,
             finish_reasons=finish_reasons,
             logprob_results=logprob_results,
-            num_prompt_tokens=num_prompt_tokens,
-            num_completion_tokens=num_completion_tokens,
+            usage=request_final_usage,
         )
 
     async def _handle_chat_completion(
-        self, request: openai_api_protocol.ChatCompletionRequest, request_id: str
+        self,
+        request: openai_api_protocol.ChatCompletionRequest,
+        request_id: str,
+        request_final_usage_include_extra: bool,
     ) -> AsyncGenerator[openai_api_protocol.ChatCompletionStreamResponse, Any]:
         """The implementation fo asynchronous ChatCompletionRequest handling.
 
@@ -1167,37 +1237,41 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
             self.max_input_sequence_length,
             self.conv_template.model_copy(deep=True),
         )
-
+        # prompt length is not used
+        _ = prompt_length
         finish_reasons: List[Optional[str]] = [None for _ in range(generation_cfg.n)]
-        num_completion_tokens = 0
         self.state.record_event(request_id, event="invoke generate")
         try:
             async for delta_outputs in self._generate(
                 prompts, generation_cfg, request_id  # type: ignore
             ):
-                response, num_completion_tokens = engine_base.process_chat_completion_stream_output(
+                response = engine_base.process_chat_completion_stream_output(
                     delta_outputs,
+                    request,
                     request_id,
                     self.state,
-                    request.model,
-                    generation_cfg,
                     use_function_calling,
-                    prompt_length,
                     finish_reasons,
-                    num_completion_tokens,
                 )
+
                 if response is not None:
+                    if response.usage is not None:
+                        if not request_final_usage_include_extra:
+                            response.usage.extra = None
                     yield response
             self.state.record_event(request_id, event="finish")
-        except (
-            Exception,
-            asyncio.CancelledError,
-        ) as err:  # pylint: disable=broad-exception-caught
+        except asyncio.CancelledError:  # pylint: disable=try-except-raise
+            # for cancelled error, we can simply pass it through
+            raise
+        except Exception as err:  # pylint: disable=broad-exception-caught
             logger.error("Error in _handle_chat_completion for request %s: %s", request_id, err)
-            raise err
+            raise
 
     async def _handle_completion(
-        self, request: openai_api_protocol.CompletionRequest, request_id: str
+        self,
+        request: openai_api_protocol.CompletionRequest,
+        request_id: str,
+        request_final_usage_include_extra: bool,
     ) -> AsyncGenerator[openai_api_protocol.CompletionResponse, Any]:
         """The implementation fo asynchronous CompletionRequest handling.
 
@@ -1224,42 +1298,44 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
             self.state,
             self.tokenizer,
             self.max_input_sequence_length,
+            self.conv_template.model_copy(deep=True),
         )
+        _ = prompt_length
         if echo_response is not None:
             yield echo_response
 
-        num_completion_tokens = 0
         finish_reasons: List[Optional[str]] = [None for _ in range(generation_cfg.n)]
         self.state.record_event(request_id, event="invoke generate")
         try:
             async for delta_outputs in self._generate(
                 prompt, generation_cfg, request_id  # type: ignore
             ):
-                response, num_completion_tokens = engine_base.process_completion_stream_output(
+                response = engine_base.process_completion_stream_output(
                     delta_outputs,
+                    request,
                     request_id,
                     self.state,
-                    request.model,
-                    generation_cfg,
-                    prompt_length,
                     finish_reasons,
-                    num_completion_tokens,
                 )
+
                 if response is not None:
+                    if response.usage is not None:
+                        if not request_final_usage_include_extra:
+                            response.usage.extra = None
                     yield response
 
             suffix_response = engine_base.create_completion_suffix_response(
-                request, request_id, prompt_length, finish_reasons, num_completion_tokens
+                request, request_id, finish_reasons
             )
             if suffix_response is not None:
                 yield suffix_response
             self.state.record_event(request_id, event="finish")
-        except (
-            Exception,
-            asyncio.CancelledError,
-        ) as err:  # pylint: disable=broad-exception-caught
+        except asyncio.CancelledError:  # pylint: disable=try-except-raise
+            # for cancelled error, we can simply pass it through
+            raise
+        except Exception as err:  # pylint: disable=broad-exception-caught
             logger.error("Error in _handle_completion for request %s: %s", request_id, err)
-            raise err
+            raise
 
     async def _generate(
         self,
@@ -1298,8 +1374,8 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
         # Create the request with the given id, input data, generation
         # config and the created callback.
         input_data = engine_utils.convert_prompts_to_data(prompt)
-        request = Request(
-            request_id, input_data, generation_config, self.default_generation_cfg_json_str
+        request = self._ffi["create_request"](
+            request_id, input_data, generation_config.model_dump_json(by_alias=True)
         )
 
         # Create the unique async request stream of the request.
@@ -1318,25 +1394,28 @@ class AsyncMLCEngine(engine_base.MLCEngineBase):
                 stream,
                 [TextStreamer(self.tokenizer) for _ in range(generation_config.n)],
             )
-            self.state.async_num_unfinished_generations[request_id] = generation_config.n
             self._ffi["add_request"](request)
 
-        # Iterate the stream asynchronously and yield the output.
-        try:
-            async for request_output in stream:
-                yield request_output
-        except (
-            Exception,
-            asyncio.CancelledError,
-        ) as exception:  # pylint: disable=broad-exception-caught
-            logger.error("Error in _generate for request %s: %s", request_id, exception)
-            await self.abort(request_id)
-            raise exception
+        def abort_request():
+            """clean up"""
+            self._abort(request_id)
+            logger.info("request %s cancelled", request_id)
+
+        with engine_utils.ErrorCleanupScope(abort_request):
+            # Iterate the stream asynchronously and yield the output.
+            try:
+                async for request_output in stream:
+                    yield request_output
+            except asyncio.CancelledError:  # pylint: disable=try-except-raise
+                # for cancelled error, we can simply pass it through
+                raise
+            except Exception as exception:  # pylint: disable=broad-exception-caught
+                logger.error("Exception in _generate for request %s: %s", request_id, exception)
+                raise
 
     def _abort(self, request_id: str):
         """Internal implementation of request abortion."""
         self.state.async_streamers.pop(request_id, None)
-        self.state.async_num_unfinished_generations.pop(request_id, None)
         self._ffi["abort_request"](request_id)
 
 
@@ -1364,7 +1443,7 @@ class MLCEngine(engine_base.MLCEngineBase):
         The engine mode in MLC LLM.
         We provide three preset modes: "local", "interactive" and "server".
         The default mode is "local".
-        The choice of mode decides the values of "max_batch_size", "max_total_sequence_length"
+        The choice of mode decides the values of "max_num_sequence", "max_total_sequence_length"
         and "prefill_chunk_size" when they are not explicitly specified.
         1. Mode "local" refers to the local server deployment which has low
         request concurrency. So the max batch size will be set to 4, and max
@@ -1379,53 +1458,15 @@ class MLCEngine(engine_base.MLCEngineBase):
         In this mode, we will automatically infer the largest possible max batch
         size and max total sequence length.
 
-        You can manually specify arguments "max_batch_size", "max_total_sequence_length" and
+        You can manually specify arguments "max_num_sequence", "max_total_sequence_length" and
         "prefill_chunk_size" to override the automatic inferred values.
 
-    additional_models : Optional[List[str]]
-        The model paths and (optional) model library paths of additional models
-        (other than the main model).
-        When engine is enabled with speculative decoding, additional models are needed.
-        Each string in the list is either in form "model_path" or "model_path:model_lib".
-        When the model lib of a model is not given, JIT model compilation will
-        be activated to compile the model automatically.
-
-    max_batch_size : Optional[int]
-        The maximum allowed batch size set for the KV cache to concurrently support.
-
-    max_total_sequence_length : Optional[int]
-        The KV cache total token capacity, i.e., the maximum total number of tokens that
-        the KV cache support. This decides the GPU memory size that the KV cache consumes.
-        If not specified, system will automatically estimate the maximum capacity based
-        on the vRAM size on GPU.
-
-    prefill_chunk_size : Optional[int]
-        The maximum number of tokens the model passes for prefill each time.
-        It should not exceed the prefill chunk size in model config.
-        If not specified, this defaults to the prefill chunk size in model config.
-
-    gpu_memory_utilization : Optional[float]
-        A number in (0, 1) denoting the fraction of GPU memory used by the server in total.
-        It is used to infer to maximum possible KV cache capacity.
-        When it is unspecified, it defaults to 0.85.
-        Under mode "local" or "interactive", the actual memory usage may be
-        significantly smaller than this number. Under mode "server", the actual
-        memory usage may be slightly larger than this number.
-
-    speculative_mode : Literal["disable", "small_draft", "eagle"]
-        The speculative mode.
-        "disable" means speculative decoding is disabled.
-        "small_draft" means the normal speculative decoding (small draft) mode.
-        "eagle" means the eagle-style speculative decoding.
-
-    spec_draft_length : int
-        The number of tokens to generate in speculative proposal (draft).
+    engine_config : Optional[EngineConfig]
+        Additional configurable arguments of MLC engine.
+        See class "EngineConfig" for more detail.
 
     enable_tracing : bool
         A boolean indicating if to enable event logging for requests.
-
-    verbose : bool
-        A boolean indicating whether to print logging info in engine.
     """
 
     def __init__(  # pylint: disable=too-many-arguments,too-many-locals
@@ -1435,17 +1476,8 @@ class MLCEngine(engine_base.MLCEngineBase):
         *,
         model_lib: Optional[str] = None,
         mode: Literal["local", "interactive", "server"] = "local",
-        additional_models: Optional[List[str]] = None,
-        max_batch_size: Optional[int] = None,
-        max_total_sequence_length: Optional[int] = None,
-        prefill_chunk_size: Optional[int] = None,
-        max_history_size: Optional[int] = None,
-        prefix_cache_max_num_seqs: Optional[int] = None,
-        gpu_memory_utilization: Optional[float] = None,
-        speculative_mode: Literal["disable", "small_draft", "eagle"] = "disable",
-        spec_draft_length: int = 4,
+        engine_config: Optional[EngineConfig] = None,
         enable_tracing: bool = False,
-        verbose: bool = True,
     ) -> None:
         super().__init__(
             "sync",
@@ -1453,17 +1485,8 @@ class MLCEngine(engine_base.MLCEngineBase):
             device=device,
             model_lib=model_lib,
             mode=mode,
-            additional_models=additional_models,
-            max_batch_size=max_batch_size,
-            max_total_sequence_length=max_total_sequence_length,
-            prefill_chunk_size=prefill_chunk_size,
-            max_history_size=max_history_size,
-            prefix_cache_max_num_seqs=prefix_cache_max_num_seqs,
-            gpu_memory_utilization=gpu_memory_utilization,
-            speculative_mode=speculative_mode,
-            spec_draft_length=spec_draft_length,
+            engine_config=engine_config,
             enable_tracing=enable_tracing,
-            verbose=verbose,
         )
         self.chat = Chat(weakref.ref(self))
         self.completions = Completion(weakref.ref(self))
@@ -1471,12 +1494,23 @@ class MLCEngine(engine_base.MLCEngineBase):
     def abort(self, request_id: str) -> None:
         """Generation abortion interface.
 
-        Parameter
+        Parameters
         ---------
         request_id : str
             The id of the request to abort.
         """
         self._ffi["abort_request"](request_id)
+
+    def metrics(self) -> engine_base.EngineMetrics:
+        """Get engine metrics
+
+        Returns
+        -------
+        metrics: EngineMetrics
+            The engine metrics
+        """
+        # pylint: disable=protected-access
+        return engine_base._query_engine_metrics(self)
 
     def _chat_completion(  # pylint: disable=too-many-arguments,too-many-locals
         self,
@@ -1493,14 +1527,15 @@ class MLCEngine(engine_base.MLCEngineBase):
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stream: bool = False,
+        stream_options: Optional[Dict[str, Any]] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[Literal["none", "auto"], Dict]] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        debug_config: Optional[Dict[str, Any]] = None,
     ) -> Union[
         Iterator[openai_api_protocol.ChatCompletionStreamResponse],
         openai_api_protocol.ChatCompletionResponse,
@@ -1514,6 +1549,9 @@ class MLCEngine(engine_base.MLCEngineBase):
         request_id : Optional[str]
             The optional request id.
             A random one will be generated if it is not given.
+
+        debug_config: Optional[Dict[str, Any]] = None,
+            Extra debug options to pass to the request.
 
         Raises
         ------
@@ -1540,6 +1578,11 @@ class MLCEngine(engine_base.MLCEngineBase):
                 seed=seed,
                 stop=stop,
                 stream=stream,
+                stream_options=(
+                    openai_api_protocol.StreamOptions.model_validate(stream_options)
+                    if stream_options is not None
+                    else None
+                ),
                 temperature=temperature,
                 top_p=top_p,
                 tools=(
@@ -1549,10 +1592,14 @@ class MLCEngine(engine_base.MLCEngineBase):
                 ),
                 tool_choice=tool_choice,
                 user=user,
-                ignore_eos=ignore_eos,
                 response_format=(
                     openai_api_protocol.RequestResponseFormat.model_validate(response_format)
                     if response_format is not None
+                    else None
+                ),
+                debug_config=(
+                    debug_protocol.DebugConfig.model_validate(debug_config)
+                    if debug_config is not None
                     else None
                 ),
             ),
@@ -1562,16 +1609,17 @@ class MLCEngine(engine_base.MLCEngineBase):
             # Stream response.
             return chatcmpl_generator
         # Normal response.
-        num_prompt_tokens = 0
-        num_completion_tokens = 0
+        request_final_usage = None
         output_texts = ["" for _ in range(n)]
         finish_reasons: List[Optional[str]] = [None for _ in range(n)]
         logprob_results: Optional[List[List[openai_api_protocol.LogProbsContent]]] = (
             [[] for _ in range(n)] if logprobs else None
         )
         for response in chatcmpl_generator:
-            num_prompt_tokens = response.usage.prompt_tokens
-            num_completion_tokens = response.usage.completion_tokens
+            # if usage is not None, this is the last chunk
+            if response.usage is not None:
+                request_final_usage = response.usage
+                continue
             for choice in response.choices:
                 assert isinstance(choice.delta.content, str)
                 output_texts[choice.index] += choice.delta.content
@@ -1595,8 +1643,7 @@ class MLCEngine(engine_base.MLCEngineBase):
             tool_calls_list=tool_calls_list,
             logprob_results=logprob_results,
             use_function_calling=use_function_calling,
-            num_prompt_tokens=num_prompt_tokens,
-            num_completion_tokens=num_completion_tokens,
+            usage=request_final_usage,
         )
 
     def _completion(  # pylint: disable=too-many-arguments,too-many-locals
@@ -1611,19 +1658,23 @@ class MLCEngine(engine_base.MLCEngineBase):
         logprobs: bool = False,
         top_logprobs: int = 0,
         logit_bias: Optional[Dict[int, float]] = None,
-        max_tokens: int = 16,
+        max_tokens: Optional[int] = None,
         n: int = 1,
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stream: bool = False,
+        stream_options: Optional[Dict[str, Any]] = None,
         suffix: Optional[str] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         user: Optional[str] = None,
-        ignore_eos: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
-    ) -> Iterator[openai_api_protocol.CompletionResponse]:
+        debug_config: Optional[Dict[str, Any]] = None,
+    ) -> Union[
+        Iterator[openai_api_protocol.CompletionResponse],
+        openai_api_protocol.CompletionResponse,
+    ]:
         """Synchronous completion internal interface with OpenAI API compatibility.
 
         See https://platform.openai.com/docs/api-reference/completions/create for specification.
@@ -1634,6 +1685,9 @@ class MLCEngine(engine_base.MLCEngineBase):
             The optional request id.
             A random one will be generated if it is not given.
 
+        debug_config: Optional[Dict[str, Any]] = None,
+            Extra debug options to pass to the request.
+
         Raises
         ------
         e : BadRequestError
@@ -1641,6 +1695,7 @@ class MLCEngine(engine_base.MLCEngineBase):
         """
         if request_id is None:
             request_id = f"cmpl-{engine_utils.random_uuid()}"
+
         cmpl_generator = self._handle_completion(
             openai_api_protocol.CompletionRequest(
                 model=model,
@@ -1657,25 +1712,33 @@ class MLCEngine(engine_base.MLCEngineBase):
                 seed=seed,
                 stop=stop,
                 stream=stream,
+                stream_options=(
+                    openai_api_protocol.StreamOptions.model_validate(stream_options)
+                    if stream_options is not None
+                    else None
+                ),
                 suffix=suffix,
                 temperature=temperature,
                 top_p=top_p,
                 user=user,
-                ignore_eos=ignore_eos,
                 response_format=(
                     openai_api_protocol.RequestResponseFormat.model_validate(response_format)
                     if response_format is not None
                     else None
                 ),
+                debug_config=(
+                    debug_protocol.DebugConfig.model_validate(debug_config)
+                    if debug_config is not None
+                    else None
+                ),
             ),
-            request_id,
+            request_id=request_id,
         )
         if stream:
             # Stream response.
             return cmpl_generator
         # Normal response.
-        num_prompt_tokens = 0
-        num_completion_tokens = 0
+        request_final_usage = None
         output_texts = ["" for _ in range(n)]
         finish_reasons: List[Optional[str]] = [None for _ in range(n)]
         logprob_results: Optional[List[List[openai_api_protocol.LogProbsContent]]] = (
@@ -1683,8 +1746,10 @@ class MLCEngine(engine_base.MLCEngineBase):
         )
 
         for response in cmpl_generator:
-            num_prompt_tokens = response.usage.prompt_tokens
-            num_completion_tokens = response.usage.completion_tokens
+            # this is the final chunk
+            if response.usage is not None:
+                request_final_usage = response.usage
+                continue
             for choice in response.choices:
                 output_texts[choice.index] += choice.text
                 if choice.finish_reason is not None and finish_reasons[choice.index] is None:
@@ -1702,8 +1767,7 @@ class MLCEngine(engine_base.MLCEngineBase):
             output_texts=output_texts,
             finish_reasons=finish_reasons,
             logprob_results=logprob_results,
-            num_prompt_tokens=num_prompt_tokens,
-            num_completion_tokens=num_completion_tokens,
+            usage=request_final_usage,
         )
 
     def _handle_chat_completion(
@@ -1737,21 +1801,18 @@ class MLCEngine(engine_base.MLCEngineBase):
             self.max_input_sequence_length,
             self.conv_template.model_copy(deep=True),
         )
+        _ = prompt_length
 
         finish_reasons: List[Optional[str]] = [None for _ in range(generation_cfg.n)]
-        num_completion_tokens = 0
         self.state.record_event(request_id, event="invoke generate")
         for delta_outputs in self._generate(prompts, generation_cfg, request_id):  # type: ignore
-            response, num_completion_tokens = engine_base.process_chat_completion_stream_output(
+            response = engine_base.process_chat_completion_stream_output(
                 delta_outputs,
+                request,
                 request_id,
                 self.state,
-                request.model,
-                generation_cfg,
                 use_function_calling,
-                prompt_length,
                 finish_reasons,
-                num_completion_tokens,
             )
             if response is not None:
                 yield response
@@ -1760,7 +1821,7 @@ class MLCEngine(engine_base.MLCEngineBase):
     def _handle_completion(
         self, request: openai_api_protocol.CompletionRequest, request_id: str
     ) -> Iterator[openai_api_protocol.CompletionResponse]:
-        """The implementation fo synchronous CompletionRequest handling.
+        """The implementation for synchronous CompletionRequest handling.
 
         Yields
         ------
@@ -1785,29 +1846,27 @@ class MLCEngine(engine_base.MLCEngineBase):
             self.state,
             self.tokenizer,
             self.max_input_sequence_length,
+            self.conv_template.model_copy(deep=True),
         )
+        _ = prompt_length
         if echo_response is not None:
             yield echo_response
 
-        num_completion_tokens = 0
         finish_reasons: List[Optional[str]] = [None for _ in range(generation_cfg.n)]
         self.state.record_event(request_id, event="invoke generate")
         for delta_outputs in self._generate(prompt, generation_cfg, request_id):  # type: ignore
-            response, num_completion_tokens = engine_base.process_completion_stream_output(
+            response = engine_base.process_completion_stream_output(
                 delta_outputs,
+                request,
                 request_id,
                 self.state,
-                request.model,
-                generation_cfg,
-                prompt_length,
                 finish_reasons,
-                num_completion_tokens,
             )
             if response is not None:
                 yield response
 
         suffix_response = engine_base.create_completion_suffix_response(
-            request, request_id, prompt_length, finish_reasons, num_completion_tokens
+            request, request_id, finish_reasons
         )
         if suffix_response is not None:
             yield suffix_response
@@ -1822,7 +1881,8 @@ class MLCEngine(engine_base.MLCEngineBase):
         """Internal synchronous text generation interface of AsyncMLCEngine.
         The method is a coroutine that streams a list of CallbackStreamOutput
         at a time via yield. The returned list length is the number of
-        parallel generations specified by `generation_config.n`.
+        parallel generations specified by `generation_config.n`
+        except for the final chunk(which is always an List of size 1 and comes with usage)
 
         Parameters
         ----------
@@ -1839,9 +1899,8 @@ class MLCEngine(engine_base.MLCEngineBase):
         ------
         request_output : List[engine_base.CallbackStreamOutput]
             The delta generated outputs in a list.
-            The number of list elements equals to `generation_config.n`,
-            and each element corresponds to the delta output of a parallel
-            generation.
+            Except for the final chunk, the number of list elements equals to `generation_config.n`,
+            and each element corresponds to the delta output of a parallel generation.
         """
         if self._terminated:
             raise ValueError("The engine has terminated.")
@@ -1849,8 +1908,8 @@ class MLCEngine(engine_base.MLCEngineBase):
         # Create the request with the given id, input data, generation
         # config and the created callback.
         input_data = engine_utils.convert_prompts_to_data(prompt)
-        request = Request(
-            request_id, input_data, generation_config, self.default_generation_cfg_json_str
+        request = self._ffi["create_request"](
+            request_id, input_data, generation_config.model_dump_json(by_alias=True)
         )
 
         # Record the stream in the tracker
@@ -1858,32 +1917,54 @@ class MLCEngine(engine_base.MLCEngineBase):
         self.state.sync_text_streamers = [
             TextStreamer(self.tokenizer) for _ in range(generation_config.n)
         ]
-        self.state.sync_num_unfinished_generations = generation_config.n
         self._ffi["add_request"](request)
 
+        def abort_request():
+            """clean up request if exception happens"""
+            self.abort(request_id)
+
         # Iterate the stream asynchronously and yield the token.
-        try:
-            while self.state.sync_num_unfinished_generations > 0:
+        with engine_utils.ErrorCleanupScope(abort_request):
+            while True:
                 delta_outputs = self.state.sync_output_queue.get()
-                request_outputs = self._request_stream_callback_impl(delta_outputs)
+                request_outputs, request_final_usage_json_str = self._request_stream_callback_impl(
+                    delta_outputs
+                )
                 for request_output in request_outputs:
                     yield request_output
-        except Exception as exception:  # pylint: disable=broad-exception-caught
-            self.abort(request_id)
-            raise exception
+
+                if request_final_usage_json_str is not None:
+                    # final chunk, we can break
+                    output = engine_base.CallbackStreamOutput(
+                        delta_text="",
+                        delta_logprob_json_strs=None,
+                        finish_reason=None,
+                        request_final_usage_json_str=request_final_usage_json_str,
+                    )
+                    yield [output]
+                    break
 
     def _request_stream_callback_impl(
         self, delta_outputs: List[data.RequestStreamOutput]
-    ) -> List[List[engine_base.CallbackStreamOutput]]:
+    ) -> Tuple[List[List[engine_base.CallbackStreamOutput]], Optional[str]]:
         """The underlying implementation of request stream callback of MLCEngine."""
         batch_outputs: List[List[engine_base.CallbackStreamOutput]] = []
         for delta_output in delta_outputs:
             request_id, stream_outputs = delta_output.unpack()
             self.state.record_event(request_id, event="start callback")
+
+            # final chunk is now always indicated by a chunk
+            # where usage json is present
+            # the backend engine always streams back this chunk
+            # regardless of include_usage option
+            is_final_chunk = stream_outputs[0].request_final_usage_json_str is not None
+            if is_final_chunk:
+                return (batch_outputs, stream_outputs[0].request_final_usage_json_str)
+
             outputs: List[engine_base.CallbackStreamOutput] = []
             for stream_output, text_streamer in zip(stream_outputs, self.state.sync_text_streamers):
                 self.state.record_event(request_id, event="start detokenization")
-                delta_text = (
+                delta_text = stream_output.extra_prefix_string + (
                     text_streamer.put(stream_output.delta_token_ids)
                     if len(stream_output.delta_token_ids) > 0
                     else ""
@@ -1895,13 +1976,11 @@ class MLCEngine(engine_base.MLCEngineBase):
                 outputs.append(
                     engine_base.CallbackStreamOutput(
                         delta_text=delta_text,
-                        num_delta_tokens=len(stream_output.delta_token_ids),
                         delta_logprob_json_strs=stream_output.delta_logprob_json_strs,
                         finish_reason=stream_output.finish_reason,
+                        request_final_usage_json_str=None,
                     )
                 )
-                if stream_output.finish_reason is not None:
-                    self.state.sync_num_unfinished_generations -= 1
             batch_outputs.append(outputs)
             self.state.record_event(request_id, event="finish callback")
-        return batch_outputs
+        return (batch_outputs, None)

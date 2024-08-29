@@ -4,6 +4,7 @@
  */
 #include "prefix_cache.h"
 
+#include <tvm/runtime/nvtx.h>
 #include <tvm/runtime/registry.h>
 
 namespace mlc {
@@ -18,14 +19,14 @@ using namespace tvm::runtime;
 class PrefixCacheImpl : public PrefixCacheObj {
  public:
   /*!
-   * \brief Contructor of paged radix tree.
-   * \param max_num_seqs The maximum number of sequences in prefix cache.
+   * \brief Constructor of paged radix tree.
+   * \param max_num_recycling_seqs The maximum number of sequences in prefix cache.
    * \param remove_callback The optional callback function to call when removing a sequence.
    */
-  explicit PrefixCacheImpl(size_t max_num_seqs, PrefixCacheRemoveCallback remove_callback)
+  explicit PrefixCacheImpl(size_t max_num_recycling_seqs, PrefixCacheRemoveCallback remove_callback)
       : radix_tree_(PagedRadixTree::Create()),
-        max_num_seqs_(max_num_seqs),
-        remove_callback_(remove_callback) {
+        max_num_recycling_seqs_(max_num_recycling_seqs),
+        remove_callback_(std::move(remove_callback)) {
     recycling_seq_lrus_.clear();
     reversed_recycling_seq_lrus_.clear();
     seq_states_.clear();
@@ -42,24 +43,17 @@ class PrefixCacheImpl : public PrefixCacheObj {
    * \param attention_sink_size The attention sink size for the sequence, 0 by default.
    * \return The matched result.
    */
-  PrefixCacheMatchedResult InsertSequence(int64_t seq_id, IntTuple tokens, int sliding_window_size,
-                                          int attention_sink_size) {
-    if (seq_states_.size() == max_num_seqs_) {
-      // If prefix cache has reached maximum number of sequences, try to pop one recycling sequence.
-      CHECK(TryFreeMemory())
-          << "PrefixCache has reached the maximum number of sequences, and no recycling sequence "
-             "to be popped for new sequence. Please set larger value for maximum number of "
-             "sequences, or reduce the number of running sequence, to align with maximum number of "
-             "sequence in PrefixCache.";
-      CHECK_EQ(seq_states_.size(), max_num_seqs_ - 1);
-    }
+  PrefixCacheMatchedResult InsertSequence(int64_t seq_id, std::vector<int32_t> tokens,
+                                          int sliding_window_size, int attention_sink_size) final {
     CHECK_NE(sliding_window_size, 0);
     CHECK_GE(attention_sink_size, 0);
     CHECK(seq_states_.find(seq_id) == seq_states_.end());
     CHECK(seq_sliding_window_infos_.find(seq_id) == seq_sliding_window_infos_.end());
+    CHECK(!tokens.empty());
+    CommitSequenceExtention();
+    tokens.pop_back();
+    auto [matched_offset, matched_seqs] = radix_tree_->MatchPrefix(tokens);
     std::pair<int, size_t> sliding_window_info{sliding_window_size, attention_sink_size};
-    IntTuple popped_tokens = IntTuple(std::vector<int64_t>(tokens.begin(), tokens.end() - 1));
-    auto [matched_offset, matched_seqs] = radix_tree_->MatchPrefix(popped_tokens);
     // No prefix matched, directly adding new sequence.
     if (!matched_offset) {
       radix_tree_->AddSequence(seq_id);
@@ -73,7 +67,7 @@ class PrefixCacheImpl : public PrefixCacheObj {
     // The reusage of recycling sequences logic is different between with/without sliding window
     // enabled.
     if (sliding_window_size != -1) {
-      // If sliding window enabled, the reusage of recycling sequences should be limitted to exactly
+      // If sliding window enabled, the reusage of recycling sequences should be limited to exactly
       // matched. And no rolling back is allowed due to the sliding window.
       for (int64_t matched_seq_id : matched_seqs) {
         if (seq_states_.at(matched_seq_id) == SequenceState::kRecycling &&
@@ -102,7 +96,7 @@ class PrefixCacheImpl : public PrefixCacheObj {
           }
         }
       }
-      if (shortest_recycling_seq_id != -1) {
+      if (shortest_recycling_seq_id != -1 && matched_offset > shortest_recycling_seq_length * 0.9) {
         ReuseRecyclingSequence(shortest_recycling_seq_id);
         if (shortest_recycling_seq_length > matched_offset) {
           // Recycling sequence is longer than new sequence, rolling back the redundant trailing
@@ -114,7 +108,7 @@ class PrefixCacheImpl : public PrefixCacheObj {
                                         shortest_recycling_seq_length - matched_offset};
       }
       // No reusage of recycling sequence, fallback to forking matched sequence. Currently, we only
-      // fork from sequence without sliding window, due to current paged KVCache implmentation.
+      // fork from sequence without sliding window, due to current paged KVCache implementation.
       size_t longest_forking_offset = 0;
       int64_t longest_forking_seq_id = -1;
       for (int64_t matched_seq_id : matched_seqs) {
@@ -146,13 +140,29 @@ class PrefixCacheImpl : public PrefixCacheObj {
 
   /*!
    * \brief Extend a sequence with new tokenized sequence suffix.
-   * \param seq_id The sequence to be extneded.
+   * \param seq_id The sequence to be extended.
    * \param tokens The tokens of tokenized sequence suffix to extend.
    * \throw Error if the given sequence id is not valid or active.
    */
-  void ExtendSequence(int64_t seq_id, IntTuple tokens) {
-    CHECK(seq_states_.at(seq_id) == SequenceState::kActive);
-    radix_tree_->ExtendSequence(seq_id, tokens);
+  void ExtendSequence(int64_t seq_id, const std::vector<int32_t>& tokens) final {
+    uncommitted_extended_token_ids_.emplace_back(seq_id, tokens);
+  }
+
+  void CommitSequenceExtention() final {
+    if (uncommitted_extended_token_ids_.empty()) {
+      return;
+    }
+    NVTXScopedRange nvtx_scope("PrefixCache commit sequence extension");
+    for (const auto& [seq_id, uncommitted_token_ids] : uncommitted_extended_token_ids_) {
+      if (!HasSequence(seq_id)) {
+        // The sequence has been removed. Hence no action is needed.
+        continue;
+      }
+      const auto& it = seq_states_.find(seq_id);
+      CHECK(it == seq_states_.end() || it->second == SequenceState::kActive);
+      radix_tree_->ExtendSequence(seq_id, uncommitted_token_ids);
+    }
+    uncommitted_extended_token_ids_.clear();
   }
 
   /*!
@@ -161,7 +171,8 @@ class PrefixCacheImpl : public PrefixCacheObj {
    * \param num_tokens The number of tokens to be rolled back.
    * \throw Error if the given sequence id is not valid or active.
    */
-  void RollBackSequence(int64_t seq_id, size_t num_tokens) {
+  void RollBackSequence(int64_t seq_id, size_t num_tokens) final {
+    CommitSequenceExtention();
     CHECK(seq_states_.at(seq_id) == SequenceState::kActive);
     radix_tree_->RollBackSequence(seq_id, num_tokens);
   }
@@ -174,11 +185,18 @@ class PrefixCacheImpl : public PrefixCacheObj {
    * \param lazy The flag if the sequence should be removed lazily or intermediary.
    * \throw Error if the given sequence id is not valid.
    */
-  void RecycleSequence(int64_t seq_id, bool lazy = true) {
+  void RecycleSequence(int64_t seq_id, bool lazy = true) final {
+    CommitSequenceExtention();
     CHECK(seq_states_.at(seq_id) == SequenceState::kActive);
     CHECK(recycling_seq_lrus_.find(seq_id) == recycling_seq_lrus_.end());
-    if (lazy) {
+    if (lazy && max_num_recycling_seqs_ != 0) {
       // Remove the sequence lazily.
+      if (recycling_seq_lrus_.size() == max_num_recycling_seqs_) {
+        // If prefix cache has reached maximum number of recycling sequences, try to pop one
+        // recycling sequence.
+        CHECK(TryFreeMemory());
+        CHECK_EQ(recycling_seq_lrus_.size(), max_num_recycling_seqs_ - 1);
+      }
       seq_states_.at(seq_id) = SequenceState::kRecycling;
       ++lru_counter_;
       recycling_seq_lrus_.emplace(seq_id, lru_counter_);
@@ -201,7 +219,8 @@ class PrefixCacheImpl : public PrefixCacheObj {
    freed successfully.
    * \throw Error if the given sequence id is not valid.
    */
-  bool TryFreeMemory() {
+  bool TryFreeMemory() final {
+    NVTXScopedRange nvtx_scope("PrefixCache TryFreeMemory");
     if (reversed_recycling_seq_lrus_.empty()) {
       // There is no recycling sequence. No memory can be freed.
       return false;
@@ -226,19 +245,22 @@ class PrefixCacheImpl : public PrefixCacheObj {
    * \return The sequence existence.
    * \throw Error if sequence ID is not valid.
    */
-  bool HasSequence(int64_t seq_id) { return radix_tree_->HasSequence(seq_id); }
+  bool HasSequence(int64_t seq_id) final { return radix_tree_->HasSequence(seq_id); }
 
   /*!
    * \brief Reset the prefix cache to initial status.
    */
-  void Reset() {
+  void Reset() final {
     radix_tree_->Reset();
     recycling_seq_lrus_.clear();
     reversed_recycling_seq_lrus_.clear();
     seq_states_.clear();
     seq_sliding_window_infos_.clear();
+    uncommitted_extended_token_ids_.clear();
     lru_counter_ = 0;
   }
+
+  PrefixCacheMode Mode() final { return PrefixCacheMode::kRadix; }
 
  private:
   void ReuseRecyclingSequence(int64_t seq_id) {
@@ -274,14 +296,15 @@ class PrefixCacheImpl : public PrefixCacheObj {
    */
   std::unordered_map<int64_t, size_t> recycling_seq_lrus_;
   /*!
-   * \brief The map from LRU time stamps to sequence, used to find the sequence with earlist LRU
+   * \brief The map from LRU time stamps to sequence, used to find the sequence with earliest LRU
    * time stamp.
    */
   std::unordered_map<size_t, int64_t> reversed_recycling_seq_lrus_;
   /*!
-   * \brief The maximum number of sequences in prefix cache. Set -1 as infinite prefix cache.
+   * \brief The maximum number of recycling sequences in prefix cache. Set -1 as infinite prefix
+   * cache.
    */
-  int max_num_seqs_ = -1;
+  int max_num_recycling_seqs_ = -1;
   /*!
    * \brief The LRU counter.
    */
@@ -302,6 +325,15 @@ class PrefixCacheImpl : public PrefixCacheObj {
    * non-negative and used when sliding window size is positive.
    */
   std::unordered_map<int64_t, std::pair<int, size_t>> seq_sliding_window_infos_;
+  /*!
+   * \brief The collection of uncommitted extended token ids of sequences.
+   * The "ExtendSequence" method only lazily add token ids into this collection,
+   * and these uncommitted token ids will be committed when needed.
+   *
+   * Note: Since the tokens stored are references, CommitSequenceExtention should be called after
+   * each action, to avoid the uncaught changes of uncomitted extended token ids.
+   */
+  std::vector<std::pair<int64_t, const std::vector<int32_t>&>> uncommitted_extended_token_ids_;
 };  // namespace serve
 
 TVM_REGISTER_OBJECT_TYPE(PrefixCacheImpl);
@@ -320,21 +352,24 @@ class NoPrefixCache : public PrefixCacheObj {
    * \param attention_sink_size The attention sink size for the sequence, 0 by default.
    * \return The matched result.
    */
-  PrefixCacheMatchedResult InsertSequence(int64_t seq_id, IntTuple tokens, int sliding_window_size,
-                                          int attention_sink_size) {
+  PrefixCacheMatchedResult InsertSequence(int64_t seq_id, std::vector<int32_t> tokens,
+                                          int sliding_window_size, int attention_sink_size) final {
     // Since there is no prefix cache, always return as new sequence.
     return PrefixCacheMatchedResult{0, -1, -1, 0};
   }
 
   /*!
    * \brief Extend a sequence with new tokenized sequence suffix.
-   * \param seq_id The sequence to be extneded.
+   * \param seq_id The sequence to be extended.
    * \param tokens The tokens of tokenized sequence suffix to extend.
    * \throw Error if called since this should never be called.
    */
-  void ExtendSequence(int64_t seq_id, IntTuple tokens) {
-    // Since there is no prefix cache, this method should never be called.
-    LOG(FATAL) << "Unreachable code.";
+  void ExtendSequence(int64_t seq_id, const std::vector<int32_t>& tokens) final {
+    // No-op;
+  }
+
+  void CommitSequenceExtention() final {
+    // No-op;
   }
 
   /*!
@@ -343,7 +378,7 @@ class NoPrefixCache : public PrefixCacheObj {
    * \param num_tokens The number of tokens to be rolled back.
    * \throw Error if called since this should never be called.
    */
-  void RollBackSequence(int64_t seq_id, size_t num_tokens) {
+  void RollBackSequence(int64_t seq_id, size_t num_tokens) final {
     // Since there is no prefix cache, this method should never be called.
     LOG(FATAL) << "Unreachable code.";
   }
@@ -356,7 +391,7 @@ class NoPrefixCache : public PrefixCacheObj {
    * \param lazy The flag if the sequence should be removed lazily or intermediary.
    * \throw Error if the given sequence id is not valid.
    */
-  void RecycleSequence(int64_t seq_id, bool lazy = true) {
+  void RecycleSequence(int64_t seq_id, bool lazy = true) final {
     // Since there is no prefix cache, this method should never be called.
     LOG(FATAL) << "Unreachable code.";
   }
@@ -366,7 +401,7 @@ class NoPrefixCache : public PrefixCacheObj {
    recycling sequence.
    * \return Always return false as no sequence stored.
    */
-  bool TryFreeMemory() {
+  bool TryFreeMemory() final {
     // Since there is no prefix cache, always return false.
     return false;
   }
@@ -376,7 +411,7 @@ class NoPrefixCache : public PrefixCacheObj {
    * \param seq_id The sequence ID for index.
    * \return Always return false as no sequence stored.
    */
-  bool HasSequence(int64_t seq_id) {
+  bool HasSequence(int64_t seq_id) final {
     // Since there is no prefix cache, always return false.
     return false;
   }
@@ -384,22 +419,23 @@ class NoPrefixCache : public PrefixCacheObj {
   /*!
    * \brief Reset the prefix cache to initial status. Do nothing and return.
    */
-  void Reset() {}
+  void Reset() final {}
+
+  PrefixCacheMode Mode() final { return PrefixCacheMode::kDisable; }
 };
 
 TVM_REGISTER_OBJECT_TYPE(NoPrefixCache);
 
-PrefixCache PrefixCache::Create(size_t max_num_seqs, PrefixCacheRemoveCallback remove_callback) {
-  if (max_num_seqs == 0) {
-    // If maximum number of sequence in prefix cache is 0, prefix cache is not enabled and return a
-    // dummy one.
-    ObjectPtr<NoPrefixCache> n = make_object<NoPrefixCache>();
-    return PrefixCache(std::move(n));
-  } else {
-    // If maximum number of sequence in prefix cache is positive, prefix cache is enabled.
-    ObjectPtr<PrefixCacheImpl> n = make_object<PrefixCacheImpl>(max_num_seqs, remove_callback);
-    return PrefixCache(std::move(n));
-  }
+PrefixCache PrefixCache::CreateRadixPrefixCache(size_t max_num_recycling_seqs,
+                                                PrefixCacheRemoveCallback remove_callback) {
+  ObjectPtr<PrefixCacheImpl> n =
+      make_object<PrefixCacheImpl>(max_num_recycling_seqs, std::move(remove_callback));
+  return PrefixCache(std::move(n));
+}
+
+PrefixCache PrefixCache::CreateNoPrefixCache() {
+  ObjectPtr<NoPrefixCache> n = make_object<NoPrefixCache>();
+  return PrefixCache(std::move(n));
 }
 
 }  // namespace serve

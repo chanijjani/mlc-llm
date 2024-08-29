@@ -4,8 +4,10 @@ from typing import Callable, List, Optional
 
 import numpy as np
 
-from mlc_llm.serve import GenerationConfig, Request, RequestStreamOutput, data
-from mlc_llm.serve.sync_engine import SyncMLCEngine
+from mlc_llm.protocol.generation_config import GenerationConfig
+from mlc_llm.serve import Request, RequestStreamOutput, data
+from mlc_llm.serve.sync_engine import EngineConfig, SyncMLCEngine
+from mlc_llm.testing import require_test_model
 
 prompts = [
     "What is the meaning of life?",
@@ -22,6 +24,7 @@ prompts = [
 
 
 def create_requests(
+    engine: SyncMLCEngine,
     num_requests: int,
     stop_token_id: Optional[int] = None,
     temperature: float = 0.8,
@@ -36,7 +39,7 @@ def create_requests(
     for req_id, prompt in zip(range(num_requests), prompts):
         max_tokens = np.random.randint(max_tokens_low, max_tokens_high)
         requests.append(
-            Request(
+            engine.create_request(
                 request_id=str(req_id),
                 inputs=data.TextData(prompt),
                 generation_config=GenerationConfig(
@@ -50,7 +53,8 @@ def create_requests(
     return requests
 
 
-def test_engine_basic():
+@require_test_model("Llama-2-7b-chat-hf-q0f16-MLC")
+def test_engine_basic(model: str):
     """Test engine **without continuous batching**.
 
     - Add all requests to the engine altogether in the beginning.
@@ -68,7 +72,7 @@ def test_engine_basic():
     np.random.seed(0)
 
     # Output list
-    outputs = [[] for _ in range(num_requests)]
+    outputs: List[List[int]] = [[] for _ in range(num_requests)]
 
     # Define the callback function for request generation results
     def fcallback(delta_outputs: List[RequestStreamOutput]):
@@ -78,7 +82,6 @@ def test_engine_basic():
             outputs[int(request_id)] += stream_outputs[0].delta_token_ids
 
     # Create engine
-    model = "HF://mlc-ai/Llama-2-7b-chat-hf-q0f16-MLC"
     engine = SyncMLCEngine(
         model=model,
         mode="server",
@@ -87,6 +90,7 @@ def test_engine_basic():
 
     # Create requests
     requests = create_requests(
+        engine,
         num_requests,
         temperature=temperature,
         repetition_penalty=repetition_penalty,
@@ -108,7 +112,8 @@ def test_engine_basic():
         print(f"Output {req_id}:{engine.tokenizer.decode(output)}\n")
 
 
-def test_engine_continuous_batching_1():
+@require_test_model("Llama-2-7b-chat-hf-q0f16-MLC")
+def test_engine_continuous_batching_1(model: str):
     """Test engine **with continuous batching**.
 
     - Add all requests to the engine altogether in the beginning.
@@ -128,8 +133,8 @@ def test_engine_continuous_batching_1():
     np.random.seed(0)
 
     # Output list
-    outputs = [[] for _ in range(num_requests)]
-    finish_time = [None] * num_requests
+    outputs: List[List[int]] = [[] for _ in range(num_requests)]
+    finish_time: List[Optional[int]] = [None] * num_requests
 
     # Define the callback class for request generation results
     class CallbackTimer:
@@ -152,7 +157,6 @@ def test_engine_continuous_batching_1():
 
     # Create engine
     timer = CallbackTimer()
-    model = "HF://mlc-ai/Llama-2-7b-chat-hf-q0f16-MLC"
     engine = SyncMLCEngine(
         model=model,
         mode="server",
@@ -161,6 +165,7 @@ def test_engine_continuous_batching_1():
 
     # Create requests
     requests = create_requests(
+        engine,
         num_requests,
         temperature=temperature,
         repetition_penalty=repetition_penalty,
@@ -187,7 +192,8 @@ def test_engine_continuous_batching_1():
         ), f"finish time = {fin_time}, max tokens = {request.generation_config.max_tokens - 1}"
 
 
-def test_engine_continuous_batching_2():
+@require_test_model("Llama-2-7b-chat-hf-q0f16-MLC")
+def test_engine_continuous_batching_2(model: str):
     """Test engine **with continuous batching**.
 
     - Add all requests to the engine altogether in the beginning.
@@ -207,8 +213,8 @@ def test_engine_continuous_batching_2():
     np.random.seed(0)
 
     # Output list
-    outputs = [[] for _ in range(num_requests)]
-    finish_time = [None] * num_requests
+    outputs: List[List[int]] = [[] for _ in range(num_requests)]
+    finish_time: List[Optional[int]] = [None] * num_requests
 
     # Define the callback class for request generation results
     class CallbackTimer:
@@ -231,7 +237,6 @@ def test_engine_continuous_batching_2():
 
     # Create engine
     timer = CallbackTimer()
-    model = "HF://mlc-ai/Llama-2-7b-chat-hf-q0f16-MLC"
     engine = SyncMLCEngine(
         model=model,
         mode="server",
@@ -240,6 +245,7 @@ def test_engine_continuous_batching_2():
 
     # Create requests
     requests = create_requests(
+        engine,
         num_requests,
         stop_token_id=stop_token_id,
         temperature=temperature,
@@ -266,7 +272,8 @@ def test_engine_continuous_batching_2():
         print(f"Output {req_id}:{engine.tokenizer.decode(output)}\n")
 
 
-def test_engine_continuous_batching_3():
+@require_test_model("Llama-2-7b-chat-hf-q0f16-MLC")
+def test_engine_continuous_batching_3(model: str):
     """Test engine **with continuous batching**.
 
     - Add requests randomly between time [0, 200).
@@ -286,8 +293,8 @@ def test_engine_continuous_batching_3():
     np.random.seed(0)
 
     # Output list
-    outputs = [[] for _ in range(num_requests)]
-    finish_time = [None] * num_requests
+    outputs: List[List[int]] = [[] for _ in range(num_requests)]
+    finish_time: List[Optional[int]] = [None] * num_requests
 
     # Define the callback class for request generation results
     class CallbackTimer:
@@ -315,7 +322,6 @@ def test_engine_continuous_batching_3():
 
     # Create engine
     timer = CallbackTimer()
-    model = "HF://mlc-ai/Llama-2-7b-chat-hf-q0f16-MLC"
     engine = SyncMLCEngine(
         model=model,
         mode="server",
@@ -324,6 +330,7 @@ def test_engine_continuous_batching_3():
 
     # Create requests
     requests = create_requests(
+        engine,
         num_requests,
         stop_token_id=stop_token_id,
         temperature=temperature,
@@ -353,13 +360,13 @@ def test_engine_continuous_batching_3():
         print(f"Output {req_id}:{engine.tokenizer.decode(output)}\n")
 
 
-def test_engine_generate():
+@require_test_model("Llama-2-7b-chat-hf-q0f16-MLC")
+def test_engine_generate(model: str):
     # Create engine
-    model = "HF://mlc-ai/Llama-2-7b-chat-hf-q0f16-MLC"
     engine = SyncMLCEngine(
         model=model,
         mode="server",
-        max_total_sequence_length=4096,
+        engine_config=EngineConfig(max_total_sequence_length=4096),
     )
 
     num_requests = 10
@@ -378,9 +385,92 @@ def test_engine_generate():
                 print(f"Output {req_id}({i}):{output}\n")
 
 
+@require_test_model("Llama-2-7b-chat-hf-q0f16-MLC")
+def test_engine_hybrid_prefill(model: str):
+    """Test engine **with hybrid prefill**.
+
+    - Add each single request step by step.
+    - All requests have the same generation length. But due to hybrid prefill,
+    the earlier request will decode with later request prefill, in single step.
+    So each request lasts the same steps, and stops generation step by step as well.
+    - Engine keeps running `step` for the generation length, to finish the last request.
+    Then check the output of each request.
+    """
+
+    # Hyperparameters for tests (you can try different combinations)
+    num_requests = 10  # [4, 8, 10]
+    temperature = 0.9  # [0.8, 0.9, 1.0, 1.1]
+    repetition_penalty = 1.00  # [1.0, 1.01]
+    max_tokens = 15
+    np.random.seed(0)
+
+    # Output list
+    outputs: List[List[int]] = [[] for _ in range(num_requests)]
+    finish_time: List[Optional[int]] = [None] * num_requests
+
+    # Define the callback class for request generation results
+    class CallbackTimer:
+        timer: int = -1
+
+        def callback_getter(self) -> Callable[[List[RequestStreamOutput]], None]:
+            def fcallback(delta_outputs: List[RequestStreamOutput]):
+                for delta_output in delta_outputs:
+                    request_id, stream_outputs = delta_output.unpack()
+                    assert len(stream_outputs) == 1
+                    if stream_outputs[0].finish_reason is not None:
+                        print(f"Request {request_id} finished at step {self.timer}.")
+                    outputs[int(request_id)] += stream_outputs[0].delta_token_ids
+                    finish_time[int(request_id)] = self.timer
+
+            return fcallback
+
+        def step(self) -> None:
+            self.timer += 1
+
+    # Create engine
+    timer = CallbackTimer()
+    engine = SyncMLCEngine(
+        model=model,
+        mode="server",
+        request_stream_callback=timer.callback_getter(),
+        engine_config=EngineConfig(prefill_mode="hybrid"),
+    )
+
+    # Create requests
+    requests = create_requests(
+        engine,
+        num_requests,
+        temperature=temperature,
+        repetition_penalty=repetition_penalty,
+        max_tokens_low=max_tokens,
+        max_tokens_high=max_tokens + 1,
+    )
+
+    # Add all requests to engine step by step
+    for step, request in enumerate(requests):
+        engine.add_request(request)
+        timer.step()
+        assert timer.timer == step
+        engine.step()
+
+    # Run steps
+    for step in range(max_tokens):
+        timer.step()
+        assert timer.timer == step + num_requests
+        engine.step()
+
+    for req_id, (request, output, fin_time) in enumerate(zip(requests, outputs, finish_time)):
+        print(f"Prompt {req_id}: {request.inputs[0]}")
+        print(f"Output {req_id}:{engine.tokenizer.decode(output)}\n")
+        assert (
+            fin_time == req_id + request.generation_config.max_tokens - 1
+        ), f"finish time = {fin_time}, max tokens = {req_id + request.generation_config.max_tokens - 1}"
+
+
 if __name__ == "__main__":
     test_engine_basic()
     test_engine_continuous_batching_1()
     test_engine_continuous_batching_2()
     test_engine_continuous_batching_3()
     test_engine_generate()
+    test_engine_hybrid_prefill()

@@ -6,13 +6,11 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Literal
 
-from mlc_llm.chat_module import ChatConfig, _get_chat_config, _get_model_path
 from mlc_llm.interface import jit
-from mlc_llm.support import logging, style
+from mlc_llm.support import download_cache, logging, style
 
 logging.enable_logging()
 logger = logging.getLogger(__name__)
@@ -56,6 +54,7 @@ def build_model_library(  # pylint: disable=too-many-branches,too-many-locals,to
         bundle_weight = model_entry.get("bundle_weight", False)
         overrides = model_entry.get("overrides", {})
         model_lib = model_entry.get("model_lib", None)
+
         estimated_vram_bytes = model_entry["estimated_vram_bytes"]
         if not isinstance(model, str):
             raise ValueError('The value of "model" in "model_list" is expected to be a string.')
@@ -71,12 +70,8 @@ def build_model_library(  # pylint: disable=too-many-branches,too-many-locals,to
             raise ValueError('The value of "model_lib" in "model_list" is expected to be string.')
 
         # - Load model config. Download happens when needed.
-        model_path_and_config_file_path = _get_model_path(model)
-        model_path = Path(model_path_and_config_file_path[0])
-        config_file_path = model_path_and_config_file_path[1]
-        chat_config = _get_chat_config(
-            config_file_path, user_chat_config=ChatConfig.from_dict(overrides)
-        )
+        model_path = download_cache.get_or_download_model(model)
+
         # - Jit compile if the model lib path is not specified.
         model_lib_path = (
             model_lib_path_for_prepare_libs.get(model_lib, None) if model_lib is not None else None
@@ -96,7 +91,7 @@ def build_model_library(  # pylint: disable=too-many-branches,too-many-locals,to
             model_lib_path, model_lib = dataclasses.astuple(
                 jit.jit(
                     model_path=model_path,
-                    chat_config=asdict(chat_config),
+                    overrides=overrides,
                     device=device,
                     system_lib_prefix=model_lib,
                     skip_log_jit_policy=True,
@@ -264,9 +259,9 @@ def validate_model_lib(  # pylint: disable=too-many-locals
         sys.exit(255)
 
 
-def build_android_binding(mlc_llm_home: Path, output: Path) -> None:
+def build_android_binding(mlc_llm_source_dir: Path, output: Path) -> None:
     """Build android binding in MLC LLM"""
-    mlc4j_path = mlc_llm_home / "android" / "mlc4j"
+    mlc4j_path = mlc_llm_source_dir / "android" / "mlc4j"
 
     # Move the model libraries to "build/lib/" for linking
     os.makedirs(Path("build") / "lib", exist_ok=True)
@@ -308,11 +303,13 @@ def build_android_binding(mlc_llm_home: Path, output: Path) -> None:
     shutil.move(src_path, dst_path)
 
 
-def build_iphone_binding(mlc_llm_home: Path, output: Path) -> None:
+def build_iphone_binding(mlc_llm_source_dir: Path, output: Path) -> None:
     """Build iOS binding in MLC LLM"""
     # Build iphone binding
     logger.info("Build iphone binding")
-    subprocess.run(["bash", mlc_llm_home / "ios" / "prepare_libs.sh"], check=True, env=os.environ)
+    subprocess.run(
+        ["bash", mlc_llm_source_dir / "ios" / "prepare_libs.sh"], check=True, env=os.environ
+    )
 
     # Copy built libraries back to output directory.
     for static_library in (Path("build") / "lib").iterdir():
@@ -323,11 +320,11 @@ def build_iphone_binding(mlc_llm_home: Path, output: Path) -> None:
 
 def package(
     package_config_path: Path,
-    mlc_llm_home: Path,
+    mlc_llm_source_dir: Path,
     output: Path,
 ) -> None:
     """Python entrypoint of package."""
-    logger.info('MLC LLM HOME: "%s"', mlc_llm_home)
+    logger.info('MLC LLM HOME: "%s"', mlc_llm_source_dir)
 
     # - Read package config.
     with open(package_config_path, "r", encoding="utf-8") as file:
@@ -361,9 +358,9 @@ def package(
 
     # - Copy model libraries
     if device == "android":
-        build_android_binding(mlc_llm_home, output)
+        build_android_binding(mlc_llm_source_dir, output)
     elif device == "iphone":
-        build_iphone_binding(mlc_llm_home, output)
+        build_iphone_binding(mlc_llm_source_dir, output)
     else:
         assert False, "Cannot reach here"
 

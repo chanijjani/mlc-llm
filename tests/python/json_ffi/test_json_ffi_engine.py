@@ -1,10 +1,15 @@
 import json
 from typing import Dict, List, Optional
 
+import pytest
 from pydantic import BaseModel
 
 from mlc_llm.json_ffi import JSONFFIEngine
 from mlc_llm.testing import require_test_model
+
+# test category "engine_feature"
+pytestmark = [pytest.mark.engine_feature]
+
 
 chat_completion_prompts = [
     "What is the meaning of life?",
@@ -146,15 +151,14 @@ def run_json_schema_function_calling(
 @require_test_model("Llama-2-7b-chat-hf-q4f16_1-MLC")
 def test_chat_completion(model):
     # Create engine.
-    engine = JSONFFIEngine(
-        model,
-        max_total_sequence_length=1024,
-    )
+    engine = JSONFFIEngine(model)
 
     run_chat_completion(engine, model)
 
     # Test malformed requests.
-    for response in engine._raw_chat_completion("malformed_string", n=1, request_id="123"):
+    for response in engine._raw_chat_completion(
+        "malformed_string", include_usage=False, request_id="123"
+    ):
         assert len(response.choices) == 1
         assert response.choices[0].finish_reason == "error"
 
@@ -164,10 +168,7 @@ def test_chat_completion(model):
 @require_test_model("Llama-2-7b-chat-hf-q4f16_1-MLC")
 def test_reload_reset_unload(model):
     # Create engine.
-    engine = JSONFFIEngine(
-        model,
-        max_total_sequence_length=1024,
-    )
+    engine = JSONFFIEngine(model)
 
     # Run chat completion before and after reload/reset.
     run_chat_completion(engine, model)
@@ -182,10 +183,7 @@ def test_reload_reset_unload(model):
 
 @require_test_model("Hermes-2-Pro-Mistral-7B-q4f16_1-MLC")
 def test_json_schema_with_system_prompt(model):
-    engine = JSONFFIEngine(
-        model,
-        max_total_sequence_length=1024,
-    )
+    engine = JSONFFIEngine(model)
 
     # run function calling
     run_json_schema_function_calling(engine, model, function_calling_prompts, tools)

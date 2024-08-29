@@ -19,17 +19,19 @@ namespace serve {
 TVM_REGISTER_OBJECT_TYPE(RequestNode);
 
 Request::Request(String id, Array<Data> inputs, GenerationConfig generation_cfg) {
-  CHECK(!inputs.empty()) << "No input data is given.";
+  if (generation_cfg->debug_config.special_request == SpecialRequestKind::kNone) {
+    CHECK(!inputs.empty()) << "No input data is given.";
+  }
   // Compute the total input length, or fall back to "-1" which means
   // unknown due to the existence of untokenized data.
-  int input_total_length = 0;
+  int prompt_tokens = 0;
   for (Data input : inputs) {
     if (const auto* token_data = input.as<TokenDataNode>()) {
-      input_total_length += token_data->token_ids.size();
+      prompt_tokens += token_data->token_ids.size();
     } else if (const auto* image_data = input.as<ImageDataNode>()) {
-      input_total_length += image_data->GetLength();
+      prompt_tokens += image_data->GetLength();
     } else {
-      input_total_length = -1;
+      prompt_tokens = -1;
       break;
     }
   }
@@ -37,7 +39,7 @@ Request::Request(String id, Array<Data> inputs, GenerationConfig generation_cfg)
   ObjectPtr<RequestNode> n = make_object<RequestNode>();
   n->id = std::move(id);
   n->inputs = std::move(inputs);
-  n->input_total_length = input_total_length;
+  n->prompt_tokens = prompt_tokens;
   n->generation_cfg = std::move(generation_cfg);
   data_ = std::move(n);
 }
@@ -59,27 +61,19 @@ Request Request::FromUntokenized(const Request& request, const Tokenizer& tokeni
 
   // If there is no untokenized input, we don't need to create a new request.
   if (!has_untokenized_input) {
-    ICHECK_NE(request->input_total_length, -1);
+    ICHECK_NE(request->prompt_tokens, -1);
     return request;
   } else {
     return Request(request->id, std::move(inputs), request->generation_cfg);
   }
 }
 
-TVM_REGISTER_GLOBAL("mlc.serve.Request")
-    .set_body_typed([](String id, Array<Data> inputs, String generation_cfg_json_str,
-                       Optional<String> default_generation_cfg_json_str) {
-      return Request(std::move(id), std::move(inputs),
-                     GenerationConfig(std::move(generation_cfg_json_str),
-                                      std::move(default_generation_cfg_json_str)));
-    });
-
 TVM_REGISTER_GLOBAL("mlc.serve.RequestGetInputs").set_body_typed([](Request request) {
   return request->inputs;
 });
 
 TVM_REGISTER_GLOBAL("mlc.serve.RequestGetGenerationConfigJSON").set_body_typed([](Request request) {
-  return request->generation_cfg->AsJSONString();
+  return picojson::value(request->generation_cfg->AsJSON()).serialize();
 });
 
 }  // namespace serve

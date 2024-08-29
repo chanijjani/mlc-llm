@@ -3,7 +3,9 @@
 import asyncio
 from typing import List
 
-from mlc_llm.serve import AsyncMLCEngine, GenerationConfig
+from mlc_llm.protocol.generation_config import GenerationConfig
+from mlc_llm.serve import AsyncMLCEngine, EngineConfig
+from mlc_llm.testing import require_test_model
 
 prompts = [
     "What is the meaning of life?",
@@ -19,13 +21,13 @@ prompts = [
 ]
 
 
-async def test_engine_generate():
+@require_test_model("Llama-2-7b-chat-hf-q4f16_1-MLC")
+async def test_engine_generate(model: str):
     # Create engine
-    model = "HF://mlc-ai/Llama-2-7b-chat-hf-q0f16-MLC"
     async_engine = AsyncMLCEngine(
         model=model,
         mode="server",
-        max_total_sequence_length=4096,
+        engine_config=EngineConfig(max_total_sequence_length=4096),
     )
 
     num_requests = 10
@@ -47,9 +49,12 @@ async def test_engine_generate():
         async for delta_outputs in async_engine._generate(
             prompt, generation_cfg, request_id=request_id
         ):
-            assert len(delta_outputs) == generation_cfg.n
-            for i, delta_output in enumerate(delta_outputs):
-                output_texts[rid][i] += delta_output.delta_text
+            if len(delta_outputs) == generation_cfg.n:
+                for i, delta_output in enumerate(delta_outputs):
+                    output_texts[rid][i] += delta_output.delta_text
+            else:
+                assert len(delta_outputs) == 1
+                assert len(delta_outputs[0].request_final_usage_json_str) != 0
 
     tasks = [
         asyncio.create_task(
@@ -74,13 +79,13 @@ async def test_engine_generate():
     del async_engine
 
 
-async def test_chat_completion():
+@require_test_model("Llama-2-7b-chat-hf-q4f16_1-MLC")
+async def test_chat_completion(model: str):
     # Create engine
-    model = "HF://mlc-ai/Llama-2-7b-chat-hf-q0f16-MLC"
     async_engine = AsyncMLCEngine(
         model=model,
         mode="server",
-        max_total_sequence_length=4096,
+        engine_config=EngineConfig(max_total_sequence_length=4096),
     )
 
     num_requests = 2
@@ -101,6 +106,7 @@ async def test_chat_completion():
         ):
             for choice in response.choices:
                 assert choice.delta.role == "assistant"
+                assert isinstance(choice.delta.content, str)
                 output_texts[rid][choice.index] += choice.delta.content
 
     tasks = [
@@ -124,13 +130,13 @@ async def test_chat_completion():
     del async_engine
 
 
-async def test_chat_completion_non_stream():
+@require_test_model("Llama-2-7b-chat-hf-q4f16_1-MLC")
+async def test_chat_completion_non_stream(model: str):
     # Create engine
-    model = "HF://mlc-ai/Llama-2-7b-chat-hf-q0f16-MLC"
     async_engine = AsyncMLCEngine(
         model=model,
         mode="server",
-        max_total_sequence_length=4096,
+        engine_config=EngineConfig(max_total_sequence_length=4096),
     )
 
     num_requests = 2
@@ -150,6 +156,7 @@ async def test_chat_completion_non_stream():
         )
         for choice in response.choices:
             assert choice.message.role == "assistant"
+            assert isinstance(choice.message.content, str)
             output_texts[rid][choice.index] += choice.message.content
 
     tasks = [
@@ -173,13 +180,13 @@ async def test_chat_completion_non_stream():
     del async_engine
 
 
-async def test_completion():
+@require_test_model("Llama-2-7b-chat-hf-q0f16-MLC")
+async def test_completion(model: str):
     # Create engine
-    model = "HF://mlc-ai/Llama-2-7b-chat-hf-q0f16-MLC"
     async_engine = AsyncMLCEngine(
         model=model,
         mode="server",
-        max_total_sequence_length=4096,
+        engine_config=EngineConfig(max_total_sequence_length=4096),
     )
 
     num_requests = 2
@@ -195,9 +202,9 @@ async def test_completion():
             model=model,
             max_tokens=max_tokens,
             n=n,
-            ignore_eos=True,
             request_id=request_id,
             stream=True,
+            extra_body={"debug_config": {"ignore_eos": True}},
         ):
             for choice in response.choices:
                 output_texts[rid][choice.index] += choice.text
@@ -223,13 +230,13 @@ async def test_completion():
     del async_engine
 
 
-async def test_completion_non_stream():
+@require_test_model("Llama-2-7b-chat-hf-q0f16-MLC")
+async def test_completion_non_stream(model: str):
     # Create engine
-    model = "HF://mlc-ai/Llama-2-7b-chat-hf-q0f16-MLC"
     async_engine = AsyncMLCEngine(
         model=model,
         mode="server",
-        max_total_sequence_length=4096,
+        engine_config=EngineConfig(max_total_sequence_length=4096),
     )
 
     num_requests = 2
@@ -245,8 +252,8 @@ async def test_completion_non_stream():
             model=model,
             max_tokens=max_tokens,
             n=n,
-            ignore_eos=True,
             request_id=request_id,
+            extra_body={"debug_config": {"ignore_eos": True}},
         )
         for choice in response.choices:
             output_texts[rid][choice.index] += choice.text

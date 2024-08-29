@@ -1,9 +1,10 @@
 """Command line entrypoint of configuration generation."""
+
 from pathlib import Path
 from typing import Union
 
-from mlc_llm.help import HELP
 from mlc_llm.interface.gen_config import CONV_TEMPLATES, gen_config
+from mlc_llm.interface.help import HELP
 from mlc_llm.model import MODELS
 from mlc_llm.quantization import QUANTIZATION
 from mlc_llm.support.argparse import ArgumentParser
@@ -77,6 +78,12 @@ def main(argv):
         help=HELP["tensor_parallel_shards"] + ' (default: "%(default)s")',
     )
     parser.add_argument(
+        "--pipeline-parallel-stages",
+        type=int,
+        default=None,
+        help=HELP["pipeline_parallel_stages"] + ' (default: "%(default)s")',
+    )
+    parser.add_argument(
         "--max-batch-size",
         type=int,
         default=80,
@@ -101,6 +108,7 @@ def main(argv):
         prefill_chunk_size=parsed.prefill_chunk_size,
         attention_sink_size=parsed.attention_sink_size,
         tensor_parallel_shards=parsed.tensor_parallel_shards,
+        pipeline_parallel_stages=parsed.pipeline_parallel_stages,
         max_batch_size=parsed.max_batch_size,
         output=parsed.output,
     )

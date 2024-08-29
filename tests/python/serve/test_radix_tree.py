@@ -1,4 +1,9 @@
+import pytest
+
 from mlc_llm.serve import PagedRadixTree
+
+# category "runtime_module"
+pytestmark = [pytest.mark.unittest]
 
 
 def test_add():
@@ -82,6 +87,18 @@ def test_fork():
             seq_id += 2
 
 
+def test_fork_2():
+    prt = PagedRadixTree()
+    prt.add(0)
+    prt.extend(0, [0, 1, 2, 3])
+    prt.fork(1, 0, 3)
+    prt.extend(1, [4])
+    prt.fork(2, 0, 3)
+    prt.extend(2, [5])
+    assert prt.match([0, 1, 2, 4]) == (4, [1])
+    assert prt.match([0, 1, 2, 5]) == (4, [2])
+
+
 def test_rollback():
     prt = PagedRadixTree()
     L = prt.free_capacity() // 64
@@ -117,4 +134,5 @@ if __name__ == "__main__":
     test_remove()
     test_extend()
     test_fork()
+    test_fork_2()
     test_rollback()
