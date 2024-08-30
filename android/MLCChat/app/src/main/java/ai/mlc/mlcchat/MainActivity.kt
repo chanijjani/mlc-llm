@@ -12,9 +12,19 @@ import androidx.compose.ui.Modifier
 
 class MainActivity : ComponentActivity() {
 
+    init {
+        System.loadLibrary("oxigraph")
+    }
+
+    private external fun hello(input: String): String?
+
     @ExperimentalMaterial3Api
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        val output: String = hello("Luke").toString()
+        println(output)
+
         setContent {
             Surface(
                 modifier = Modifier
