@@ -6,6 +6,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Environment
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.toMutableStateList
@@ -506,6 +507,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private var modelLib = ""
         private var modelPath = ""
         private val executorService = Executors.newSingleThreadExecutor()
+        private var messageCount: Int = 0
+
 
         private fun mainResetChat() {
             executorService.submit {
@@ -677,6 +680,31 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     report.value = runtimeStats
                     if (modelChatState.value == ModelChatState.Generating) switchToReady()
                 }
+            }
+        }
+
+        fun generateAnswer(prompt: String, index: Int, totalResultNumber: Int) {
+            switchToReady()
+            switchToGenerating()
+            executorService.submit {
+                appendMessage(MessageRole.User, prompt)
+                appendMessage(MessageRole.Bot, "")
+                if (!callBackend { backend.prefill(prompt) }) return@submit
+                while (!backend.stopped()) {
+                    if (!callBackend {
+                            backend.decode()
+                            val newText = backend.message
+                            updateMessage(MessageRole.Bot, newText)
+                        }) return@submit
+//                    if (modelChatState.value != ModelChatState.Generating) return@submit
+                }
+
+                if (messageCount < totalResultNumber) {
+                    Log.d("LLM RAG","Question: " + messages[index*2] + "\n\nAnswer[" + (messageCount+1) + ", " + totalResultNumber + "]: " + messages[index*2 + 1] + ", Performance: " + backend.runtimeStatsText())
+                    messageCount++
+                }
+
+                if (modelChatState.value == ModelChatState.Generating) switchToReady()
             }
         }
 
