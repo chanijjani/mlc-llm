@@ -1,0 +1,10 @@
+[package]
+name = "preference_analyzer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde_json = "1.0.96"
+substring = "1.4.3"
+strum = "0.26"
+strum_macros = "0.26"
